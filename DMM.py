@@ -1,0 +1,6857 @@
+import pygame
+import math
+import os
+import random
+import sys
+
+# ==================== 初始化配置 ====================
+os.environ['SDL_RENDER_SCALE_QUALITY'] = '2'
+os.environ['PYGAME_FREETYPE'] = '1'   # 启用 freetype 字体渲染，避免字体扫描错误
+
+pygame.init()
+pygame.mixer.init()
+
+# ==================== 游戏配置类 ====================
+class GameConfig:
+    WINDOW_WIDTH =800
+    WINDOW_HEIGHT = 600
+    WORLD_WIDTH = 3840
+    WORLD_HEIGHT = 2160
+    TILE_SIZE = 50
+    FPS = 60
+
+    PLAYER_SIZE = 51
+    PLAYER_SPEED = 300.0
+    SPRINT_MULTIPLIER = 2.0
+    MAX_HP = 100
+    HEAL_DELAY = 10.0
+    HEAL_INTERVAL = 2.0
+    HEAL_AMOUNT = 10
+
+    ROCKET_SPEED_BASE = 20
+    ROCKET_EXPLOSION_RADIUS = 50
+    ROCKET_COOLDOWN_FRAMES = 50
+    MAX_AMMO = 4
+    RELOAD_TOTAL_FRAMES = 180
+    BASE_RELOAD_INTERVAL_FRAMES = 45
+    RANGED_DAMAGE_BASE = 56
+    RECOIL_DISTANCE = 200
+    RECOIL_DURATION = 0.2
+
+    LONG_PRESS_DELAY = 20
+    LONG_PRESS_INTERVAL = 5
+    MINIMAP_WIDTH = 160
+    MINIMAP_HEIGHT = 90
+    COLLISION_ITERATIONS = 5
+
+    CHEST_SIZE = 50
+    MAX_CHESTS = 8
+    CHEST_SPAWN_RADIUS = 600
+
+# ==================== 颜色常量 ====================
+BLACK = (0, 0, 0)
+WHITE = (255, 255, 255)
+TILE_LINE = (220, 220, 220)
+DARK_GREY = (20, 20, 20)
+SKIN = (255, 224, 189)
+DARK_BROWN = (101, 67, 33)
+CLOTH = (70, 130, 200)
+GREEN = (0, 220, 0)
+RED = (220, 0, 0)
+# ==================== 安全字体加载函数 ====================
+def get_font(size, bold=False):
+    """绕过系统字体扫描，直接加载常见中文字体文件，失败则返回默认字体"""
+    font_paths = [
+        "C:/Windows/Fonts/simhei.ttf",
+        "C:/Windows/Fonts/msyh.ttc",
+        "C:/Windows/Fonts/simsun.ttc",
+    ]
+    for path in font_paths:
+        if os.path.exists(path):
+            try:
+                font = pygame.font.Font(path, size)
+                font.set_bold(bold)
+                return font
+            except:
+                continue
+    # 全部失败，使用默认字体
+    font = pygame.font.Font(None, size)
+    font.set_bold(bold)
+    return font
+# ==================== SAT碰撞检测辅助函数 ====================
+def get_rect_vertices(rect):
+    return [(rect.left, rect.top), (rect.right, rect.top),
+            (rect.right, rect.bottom), (rect.left, rect.bottom)]
+
+def project_polygon(vertices, axis):
+    dots = [v[0] * axis[0] + v[1] * axis[1] for v in vertices]
+    return min(dots), max(dots)
+
+def overlap(min1, max1, min2, max2):
+    return not (max1 < min2 or max2 < min1)
+
+def get_axes(vertices):
+    axes = []
+    n = len(vertices)
+    for i in range(n):
+        x1, y1 = vertices[i]
+        x2, y2 = vertices[(i+1) % n]
+        edge = (x2 - x1, y2 - y1)
+        axis = (-edge[1], edge[0])
+        length = math.hypot(axis[0], axis[1])
+        if length < 1e-6:
+            continue
+        axis = (axis[0]/length, axis[1]/length)
+        axes.append(axis)
+    return axes
+
+def sat_collision(rect_vertices, poly_vertices):
+    axes = get_axes(rect_vertices) + get_axes(poly_vertices)
+    min_overlap = float('inf')
+    smallest_axis = None
+    for axis in axes:
+        min_r, max_r = project_polygon(rect_vertices, axis)
+        min_p, max_p = project_polygon(poly_vertices, axis)
+        if not overlap(min_r, max_r, min_p, max_p):
+            return False, 0, (0, 0)
+        overlap_depth = min(max_r, max_p) - max(min_r, min_p)
+        if overlap_depth < min_overlap:
+            min_overlap = overlap_depth
+            smallest_axis = axis
+    poly_center = (sum(v[0] for v in poly_vertices)/len(poly_vertices),
+                   sum(v[1] for v in poly_vertices)/len(poly_vertices))
+    rect_center = (sum(v[0] for v in rect_vertices)/len(rect_vertices),
+                   sum(v[1] for v in rect_vertices)/len(rect_vertices))
+    dx, dy = rect_center[0] - poly_center[0], rect_center[1] - poly_center[1]
+    dl = math.hypot(dx, dy)
+    if dl > 1e-6:
+        dx, dy = dx/dl, dy/dl
+    dot = smallest_axis[0] * dx + smallest_axis[1] * dy
+    if dot < 0:
+        smallest_axis = (-smallest_axis[0], -smallest_axis[1])
+    return True, min_overlap, smallest_axis
+
+# ==================== 音效加载函数 ====================
+def load_sound(path):
+    try:
+        return pygame.mixer.Sound(path)
+    except:
+        return None
+
+# 音效文件路径（保持不变）
+door_sound = load_sound(r"D:\LS工作室\暗木前哨\开关门音效.mp3")
+iron_door_sound = load_sound(r"D:\LS工作室\暗木前哨\开关门音效.mp3")
+rocket_launch_sound = load_sound(r"D:\LS工作室\暗木前哨\火箭弹发射.mp3")
+rocket_explode_sound = load_sound(r"D:\LS工作室\暗木前哨\火箭弹爆炸.mp3")
+lock_fail_sound = load_sound(r"D:\LS工作室\暗木前哨\开锁失败.mp3")
+chest_open_sound = load_sound(r"D:\LS工作室\暗木前哨\开箱音效 (2).mp3")
+key_pickup_sound = load_sound(r"D:\LS工作室\暗木前哨\获得钥匙音效.mp3")
+calibration_success_sound = load_sound(r"D:\LS工作室\暗木前哨\校准成功音效.mp3")
+hit_sound = load_sound(r"D:\LS工作室\暗木前哨\受击音效1.mp3")
+pack_open_sound = load_sound(r"D:\LS工作室\暗木前哨\卡包开启音效.mp3")
+throw_sound = load_sound(r"D:\LS工作室\暗木前哨\投掷物音效.mp3")
+buy_rocket_sound = load_sound(r"D:\LS工作室\暗木前哨\购买火箭筒音效.mp3")
+coin_sound = load_sound(r"D:\LS工作室\暗木前哨\获取金币音效.mp3")
+block_place_sound = load_sound(r"D:\LS工作室\暗木前哨\阻挡箱放置音效.mp3")
+mortar_launch_sound = load_sound(r"D:\LS工作室\暗木前哨\迫击炮发射音效.mp3")
+mortar_explode_sound = load_sound(r"D:\LS工作室\暗木前哨\迫击炮爆炸音效.mp3")
+
+# ==================== 基础实体类 ====================
+class Wall:
+    _id_counter = 1
+    def __init__(self, x, y, width, height, name="未命名墙壁"):
+        self.id = Wall._id_counter
+        Wall._id_counter += 1
+        self.name = name
+        self.rect = pygame.Rect(x, y, width, height)
+        self.vertices = get_rect_vertices(self.rect)
+
+    def check_collision(self, player_rect):
+        return sat_collision(get_rect_vertices(player_rect), self.vertices)
+
+    def draw(self, screen, camera_offset):
+        r = self.rect.move(-camera_offset.x, -camera_offset.y)
+        pygame.draw.rect(screen, (128, 128, 128), r)
+        pygame.draw.rect(screen, (90, 90, 90), r, 2)
+
+# ==================== 门类基类 ====================
+class Door:
+    _id_counter = 1
+    def __init__(self):
+        self.id = Door._id_counter
+        Door._id_counter += 1
+        self.reward_callback = None
+
+    def set_reward_callback(self, callback):
+        self.reward_callback = callback
+
+    def update(self, dt):
+        raise NotImplementedError
+
+    def check_collision(self, player_rect):
+        raise NotImplementedError
+
+    def draw(self, screen, camera_offset):
+        raise NotImplementedError
+
+# ==================== 木门类 ====================
+class WoodenDoor(Door):
+    def __init__(self, wall_x, wall_center_y, is_horizontal=False, name="未命名木门"):
+        super().__init__()
+        self.name = name
+        self.wall_thickness = 30
+        self.door_width = 30 * (1/3)
+        self.door_height = 80
+        self.is_horizontal = is_horizontal
+        self.is_open = False
+        self.open_angle = 0
+        self.target_angle = 0
+        self.speed = 180
+
+        if not self.is_horizontal:
+            self.pivot_x = wall_x + 30 * 0.75
+            self.pivot_y = wall_center_y + self.door_height / 2
+            self.gap_rect = pygame.Rect(wall_x, wall_center_y - self.door_height//2, 30, self.door_height)
+            self.local_points = [(-self.door_width/2, -self.door_height),
+                                 (self.door_width/2, -self.door_height),
+                                 (self.door_width/2, 0),
+                                 (-self.door_width/2, 0)]
+            self.handle_local = (0, -self.door_height/2)
+        else:
+            self.pivot_x = wall_x
+            self.pivot_y = wall_center_y + 30 * 0.75
+            self.gap_rect = pygame.Rect(wall_x, wall_center_y, self.door_height, 30)
+            self.local_points = [(0, -self.door_width/2),
+                                 (self.door_height, -self.door_width/2),
+                                 (self.door_height, self.door_width/2),
+                                 (0, self.door_width/2)]
+            self.handle_local = (self.door_height/2, 0)
+
+        self.collision_polygon = []
+        self.update_collision()
+
+    def update_collision(self):
+        angle_rad = math.radians(self.open_angle)
+        cos_a, sin_a = math.cos(angle_rad), math.sin(angle_rad)
+        self.collision_polygon = []
+        for lx, ly in self.local_points:
+            rx = lx * cos_a - ly * sin_a
+            ry = lx * sin_a + ly * cos_a
+            self.collision_polygon.append((self.pivot_x + rx, self.pivot_y + ry))
+
+    def update(self, dt):
+        if abs(self.open_angle - self.target_angle) > 0.5:
+            direction = 1 if self.target_angle > self.open_angle else -1
+            self.open_angle += direction * self.speed * dt
+            self.open_angle = max(-90, min(0, self.open_angle))
+        else:
+            self.open_angle = self.target_angle
+        self.update_collision()
+
+    def toggle(self):
+        self.is_open = not self.is_open
+        self.target_angle = -90 if self.is_open else 0
+        if door_sound:
+            door_sound.play()
+
+    def check_interaction(self, player_rect):
+        return math.hypot(player_rect.centerx - self.pivot_x,
+                          player_rect.centery - self.pivot_y) <= 90
+
+    def check_collision(self, player_rect):
+        if not self.collision_polygon:
+            return False, 0, (0, 0)
+        return sat_collision(get_rect_vertices(player_rect), self.collision_polygon)
+
+    def draw(self, screen, camera_offset):
+        if len(self.collision_polygon) >= 3:
+            screen_pts = [(wx - camera_offset.x, wy - camera_offset.y)
+                          for wx, wy in self.collision_polygon]
+            pygame.draw.polygon(screen, (139, 69, 19), screen_pts)
+            pygame.draw.polygon(screen, (101, 67, 33), screen_pts, 2)
+
+        angle_rad = math.radians(self.open_angle)
+        cos_a, sin_a = math.cos(angle_rad), math.sin(angle_rad)
+        lx, ly = self.handle_local
+        rx = lx * cos_a - ly * sin_a
+        ry = lx * sin_a + ly * cos_a
+        sx, sy = self.pivot_x + rx - camera_offset.x, self.pivot_y + ry - camera_offset.y
+        pygame.draw.circle(screen, (200, 200, 200), (int(sx), int(sy)), 4)
+
+# ==================== 可交互Mixin ====================
+class InteractableMixin:
+    def init_interactable(self, reading_time, still_required=0.2, range_dist=80.0):
+        self.reading_time = reading_time
+        self.still_required = still_required
+        self.range_dist = range_dist
+        self.progress = 0.0
+        self.interacting = False
+        self.interact_time = 0.0
+        self.still_time = 0.0
+        self.last_player_pos = None
+        self.has_exited_range = True
+
+    def update_interaction(self, dt, player_rect, pivot_x, pivot_y, on_complete, debug_vars=None):
+        if player_rect is None:
+            return
+        current_pos = (player_rect.centerx, player_rect.centery)
+        dist = math.hypot(current_pos[0] - pivot_x, current_pos[1] - pivot_y)
+        in_range = dist <= self.range_dist
+
+        if not in_range:
+            self.has_exited_range = True
+        if self.interacting and not in_range:
+            self.cancel_interact()
+
+        if not self.interacting and in_range and self.has_exited_range:
+            if self.last_player_pos is not None:
+                dx = current_pos[0] - self.last_player_pos[0]
+                dy = current_pos[1] - self.last_player_pos[1]
+                if math.hypot(dx, dy) < 0.5:
+                    self.still_time += dt
+                    if self.still_time >= self.still_required:
+                        self.start_interact(current_pos)
+                        self.has_exited_range = False
+                else:
+                    self.still_time = 0.0
+            else:
+                self.still_time = 0.0
+        else:
+            self.still_time = 0.0
+
+        if self.interacting:
+            if self.last_player_pos is not None:
+                dx = current_pos[0] - self.last_player_pos[0]
+                dy = current_pos[1] - self.last_player_pos[1]
+                if math.hypot(dx, dy) > 1.0:
+                    self.cancel_interact()
+                else:
+                    if debug_vars and debug_vars.get('fast_interact', False):
+                        on_complete()
+                        self.cancel_interact()
+                        return
+                    self.interact_time += dt
+                    if self.interact_time >= self.reading_time:
+                        on_complete()
+                        self.cancel_interact()
+                    else:
+                        self.progress = self.interact_time / self.reading_time
+            else:
+                if debug_vars and debug_vars.get('fast_interact', False):
+                    on_complete()
+                    self.cancel_interact()
+                    return
+                self.interact_time += dt
+                if self.interact_time >= self.reading_time:
+                    on_complete()
+                    self.cancel_interact()
+                else:
+                    self.progress = self.interact_time / self.reading_time
+        self.last_player_pos = current_pos
+
+    def start_interact(self, player_pos):
+        self.interacting = True
+        self.interact_time = 0.0
+        self.progress = 0.0
+        self.last_player_pos = player_pos
+
+    def cancel_interact(self):
+        self.interacting = False
+        self.interact_time = 0.0
+        self.progress = 0.0
+
+# ==================== UI辅助函数 ====================
+def draw_progress_bar(screen, pivot_x, pivot_y, progress, camera_offset, bar_width=60, bar_height=8):
+    if progress <= 0:
+        return
+    screen_pivot_x = pivot_x - camera_offset.x
+    screen_pivot_y = pivot_y - camera_offset.y
+    bar_x = screen_pivot_x - bar_width // 2
+    bar_y = screen_pivot_y - 60
+    pygame.draw.rect(screen, WHITE, (bar_x, bar_y, bar_width, bar_height))
+    fill_width = int(bar_width * progress)
+    pygame.draw.rect(screen, BLACK, (bar_x, bar_y, fill_width, bar_height))
+    pygame.draw.rect(screen, BLACK, (bar_x, bar_y, bar_width, bar_height), 1)
+# ==================== 错误弹窗函数 ====================
+def show_error_popup(screen, clock):
+    """显示错误弹窗，返回 True 表示退出，False 表示取消"""
+    SCREEN_WIDTH = screen.get_width()
+    SCREEN_HEIGHT = screen.get_height()
+    font_large = get_font(28)
+    font_medium = get_font(24)
+
+    popup_width, popup_height = 600, 250
+    popup_rect = pygame.Rect(0, 0, popup_width, popup_height)
+    popup_rect.center = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)
+
+    cancel_btn = pygame.Rect(popup_rect.left + 40, popup_rect.bottom - 60, 100, 40)
+    exit_btn = pygame.Rect(popup_rect.right - 140, popup_rect.bottom - 60, 100, 40)
+
+    waiting = True
+    while waiting:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit()
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    return False  # 取消
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1:
+                    if cancel_btn.collidepoint(event.pos):
+                        return False
+                    if exit_btn.collidepoint(event.pos):
+                        return True
+                    if not popup_rect.collidepoint(event.pos):
+                        return False  # 点击外部关闭
+
+        # 绘制弹窗（背景半透明遮罩）
+        mask = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        mask.fill((0, 0, 0, 180))
+        screen.blit(mask, (0, 0))
+
+        # 白色弹窗主体
+        pygame.draw.rect(screen, WHITE, popup_rect, border_radius=12)
+        pygame.draw.rect(screen, BLACK, popup_rect, 3, border_radius=12)
+
+        # 主文字
+        text = font_large.render("[50001]检测到数据变化,你被迫下线", True, BLACK)
+        text_rect = text.get_rect(center=(popup_rect.centerx, popup_rect.centery - 10))
+        screen.blit(text, text_rect)
+
+        # 取消按钮（左下角）
+        pygame.draw.rect(screen, (200, 200, 200), cancel_btn, border_radius=8)
+        pygame.draw.rect(screen, BLACK, cancel_btn, 2, border_radius=8)
+        cancel_text = font_medium.render("取消", True, BLACK)
+        cancel_text_rect = cancel_text.get_rect(center=cancel_btn.center)
+        screen.blit(cancel_text, cancel_text_rect)
+
+        # 退出按钮（右下角）
+        pygame.draw.rect(screen, (200, 200, 200), exit_btn, border_radius=8)
+        pygame.draw.rect(screen, BLACK, exit_btn, 2, border_radius=8)
+        exit_text = font_medium.render("退出", True, BLACK)
+        exit_text_rect = exit_text.get_rect(center=exit_btn.center)
+        screen.blit(exit_text, exit_text_rect)
+
+        pygame.display.flip()
+        clock.tick(60)
+# ==================== 各种门类的具体实现 ====================
+class QuickProgressDoor(WoodenDoor, InteractableMixin):
+    def __init__(self, wall_x, wall_center_y, name="快速木门"):
+        WoodenDoor.__init__(self, wall_x, wall_center_y, is_horizontal=False, name=name)
+        InteractableMixin.init_interactable(self, reading_time=0.5, still_required=0.2, range_dist=80.0)
+        self.pivot_x = wall_x + 30 - 3
+        self.local_points = [
+            (-self.door_width, -self.door_height),
+            (0, -self.door_height),
+            (0, 0),
+            (-self.door_width, 0)
+        ]
+        self.handle_local = (-self.door_width/2, -self.door_height/2)
+        self.update_collision()
+
+    def update(self, dt, player_rect=None, debug_vars=None):
+        if abs(self.open_angle - self.target_angle) > 0.5:
+            direction = 1 if self.target_angle > self.open_angle else -1
+            self.open_angle += direction * self.speed * dt
+            self.open_angle = max(0, min(90, self.open_angle))
+        else:
+            self.open_angle = self.target_angle
+        self.update_collision()
+
+        def on_complete():
+            self.is_open = not self.is_open
+            self.target_angle = 90 if self.is_open else 0
+            if door_sound:
+                door_sound.play()
+        self.update_interaction(dt, player_rect, self.pivot_x, self.pivot_y, on_complete, debug_vars)
+
+    def draw(self, screen, camera_offset):
+        super().draw(screen, camera_offset)
+        draw_progress_bar(screen, self.pivot_x, self.pivot_y, self.progress, camera_offset)
+
+class HorizontalIronDoor(WoodenDoor, InteractableMixin):
+    def __init__(self, wall_x, wall_center_y, wall_thickness, gap_size, name="水平铁门"):
+        WoodenDoor.__init__(self, wall_x, wall_center_y, is_horizontal=True, name=name)
+        InteractableMixin.init_interactable(self, reading_time=4.7, still_required=0.2, range_dist=80.0)
+        self.wall_thickness = wall_thickness
+        self.door_width = 30 * (1/3)
+        self.door_height = gap_size
+        self.pivot_x = wall_x
+        self.pivot_y = wall_center_y + wall_thickness * 0.75
+        self.gap_rect = pygame.Rect(wall_x, wall_center_y, self.door_height, wall_thickness)
+        self.local_points = [
+            (0, -self.door_width/2),
+            (self.door_height, -self.door_width/2),
+            (self.door_height, self.door_width/2),
+            (0, self.door_width/2)
+        ]
+        self.handle_local = (self.door_height/2, 0)
+        self.update_collision()
+
+    def update(self, dt, player_rect=None, debug_vars=None):
+        if abs(self.open_angle - self.target_angle) > 0.5:
+            direction = 1 if self.target_angle > self.open_angle else -1
+            self.open_angle += direction * self.speed * dt
+            self.open_angle = max(0, min(90, self.open_angle))
+        else:
+            self.open_angle = self.target_angle
+        self.update_collision()
+
+        def on_complete():
+            self.toggle()
+        self.update_interaction(dt, player_rect, self.pivot_x, self.pivot_y, on_complete, debug_vars)
+
+    def toggle(self):
+        self.is_open = not self.is_open
+        self.target_angle = 90 if self.is_open else 0
+        self.has_exited_range = False
+        if iron_door_sound:
+            iron_door_sound.play()
+
+    def draw(self, screen, camera_offset):
+        if len(self.collision_polygon) >= 3:
+            screen_pts = [(wx - camera_offset.x, wy - camera_offset.y)
+                          for wx, wy in self.collision_polygon]
+            pygame.draw.polygon(screen, (192, 192, 192), screen_pts)
+            pygame.draw.polygon(screen, (128, 128, 128), screen_pts, 2)
+        angle_rad = math.radians(self.open_angle)
+        cos_a, sin_a = math.cos(angle_rad), math.sin(angle_rad)
+        lx, ly = self.handle_local
+        rx = lx * cos_a - ly * sin_a
+        ry = lx * sin_a + ly * cos_a
+        sx, sy = self.pivot_x + rx - camera_offset.x, self.pivot_y + ry - camera_offset.y
+        pygame.draw.circle(screen, (255, 215, 0), (int(sx), int(sy)), 4)
+        draw_progress_bar(screen, self.pivot_x, self.pivot_y, self.progress, camera_offset)
+
+class BottomIronDoor(HorizontalIronDoor):
+    def toggle(self):
+        self.is_open = not self.is_open
+        self.target_angle = -90 if self.is_open else 0
+        self.has_exited_range = False
+        if iron_door_sound:
+            iron_door_sound.play()
+
+    def update(self, dt, player_rect=None, debug_vars=None):
+        if abs(self.open_angle - self.target_angle) > 0.5:
+            direction = 1 if self.target_angle > self.open_angle else -1
+            self.open_angle += direction * self.speed * dt
+            self.open_angle = max(-90, min(0, self.open_angle))
+        else:
+            self.open_angle = self.target_angle
+        self.update_collision()
+        def on_complete():
+            self.toggle()
+        self.update_interaction(dt, player_rect, self.pivot_x, self.pivot_y, on_complete, debug_vars)
+
+class ThickProgressIronDoor(WoodenDoor, InteractableMixin):
+    def __init__(self, wall_x, wall_center_y, wall_thickness, gap_size, name="厚墙铁门"):
+        WoodenDoor.__init__(self, wall_x, wall_center_y, is_horizontal=False, name=name)
+        InteractableMixin.init_interactable(self, reading_time=4.7, still_required=0.2, range_dist=80.0)
+        self.wall_thickness = wall_thickness
+        self.door_width = 30 * (1/3)
+        self.door_height = gap_size
+        self.pivot_x = wall_x + wall_thickness * 0.25
+        self.pivot_y = wall_center_y + self.door_height / 2
+        self.gap_rect = pygame.Rect(wall_x, wall_center_y - self.door_height//2,
+                                    wall_thickness, self.door_height)
+        self.local_points = [
+            (-self.door_width/2, -self.door_height),
+            (self.door_width/2, -self.door_height),
+            (self.door_width/2, 0),
+            (-self.door_width/2, 0)
+        ]
+        self.handle_local = (0, -self.door_height/2)
+        self.update_collision()
+
+    def update(self, dt, player_rect=None, debug_vars=None):
+        if abs(self.open_angle - self.target_angle) > 0.5:
+            direction = 1 if self.target_angle > self.open_angle else -1
+            self.open_angle += direction * self.speed * dt
+            self.open_angle = max(0, min(90, self.open_angle))
+        else:
+            self.open_angle = self.target_angle
+        self.update_collision()
+        def on_complete():
+            self.toggle()
+        self.update_interaction(dt, player_rect, self.pivot_x, self.pivot_y, on_complete, debug_vars)
+
+    def toggle(self):
+        self.is_open = not self.is_open
+        self.target_angle = 90 if self.is_open else 0
+        self.has_exited_range = False
+        if iron_door_sound:
+            iron_door_sound.play()
+
+    def draw(self, screen, camera_offset):
+        if len(self.collision_polygon) >= 3:
+            screen_pts = [(wx - camera_offset.x, wy - camera_offset.y)
+                          for wx, wy in self.collision_polygon]
+            pygame.draw.polygon(screen, (192, 192, 192), screen_pts)
+            pygame.draw.polygon(screen, (128, 128, 128), screen_pts, 2)
+        angle_rad = math.radians(self.open_angle)
+        cos_a, sin_a = math.cos(angle_rad), math.sin(angle_rad)
+        lx, ly = self.handle_local
+        rx = lx * cos_a - ly * sin_a
+        ry = lx * sin_a + ly * cos_a
+        sx, sy = self.pivot_x + rx - camera_offset.x, self.pivot_y + ry - camera_offset.y
+        pygame.draw.circle(screen, (255, 215, 0), (int(sx), int(sy)), 4)
+        draw_progress_bar(screen, self.pivot_x, self.pivot_y, self.progress, camera_offset)
+
+class RightQuickIronDoor(Door, InteractableMixin):
+    def __init__(self, x, y, width, height, name):
+        Door.__init__(self)
+        InteractableMixin.init_interactable(self, reading_time=4.7, still_required=0.2, range_dist=80.0)
+        self.name = name
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.is_open = False
+        self.open_angle = 0
+        self.target_angle = 0
+        self.speed = 90
+        self.pivot_x = x + width / 2
+        self.pivot_y = y + height
+        self.local_points = [
+            (-width/2, -height),
+            (width/2, -height),
+            (width/2, 0),
+            (-width/2, 0)
+        ]
+        self.handle_local = (0, -height/2)
+        self.gap_rect = pygame.Rect(x, y, width, height)
+        self.collision_polygon = []
+        self.update_collision()
+
+    def update_collision(self):
+        angle_rad = math.radians(self.open_angle)
+        cos_a, sin_a = math.cos(angle_rad), math.sin(angle_rad)
+        self.collision_polygon = []
+        for lx, ly in self.local_points:
+            rx = lx * cos_a - ly * sin_a
+            ry = lx * sin_a + ly * cos_a
+            self.collision_polygon.append((self.pivot_x + rx, self.pivot_y + ry))
+
+    def update(self, dt, player_rect=None, debug_vars=None):
+        if abs(self.open_angle - self.target_angle) > 0.5:
+            direction = 1 if self.target_angle > self.open_angle else -1
+            self.open_angle += direction * self.speed * dt
+            self.open_angle = max(-90, min(0, self.open_angle))
+        else:
+            self.open_angle = self.target_angle
+        self.update_collision()
+        def on_complete():
+            self.toggle()
+        self.update_interaction(dt, player_rect, self.pivot_x, self.pivot_y, on_complete, debug_vars)
+
+    def toggle(self):
+        self.is_open = not self.is_open
+        self.target_angle = -90 if self.is_open else 0
+        self.has_exited_range = False
+        if iron_door_sound:
+            iron_door_sound.play()
+
+    def check_collision(self, player_rect):
+        if not self.collision_polygon:
+            return False, 0, (0, 0)
+        return sat_collision(get_rect_vertices(player_rect), self.collision_polygon)
+
+    def draw(self, screen, camera_offset):
+        if len(self.collision_polygon) >= 3:
+            screen_pts = [(wx - camera_offset.x, wy - camera_offset.y)
+                          for wx, wy in self.collision_polygon]
+            pygame.draw.polygon(screen, (192, 192, 192), screen_pts)
+            pygame.draw.polygon(screen, (128, 128, 128), screen_pts, 2)
+        angle_rad = math.radians(self.open_angle)
+        cos_a, sin_a = math.cos(angle_rad), math.sin(angle_rad)
+        lx, ly = self.handle_local
+        rx = lx * cos_a - ly * sin_a
+        ry = lx * sin_a + ly * cos_a
+        sx, sy = self.pivot_x + rx - camera_offset.x, self.pivot_y + ry - camera_offset.y
+        pygame.draw.circle(screen, (255, 215, 0), (int(sx), int(sy)), 4)
+        draw_progress_bar(screen, self.pivot_x, self.pivot_y, self.progress, camera_offset)
+
+class RedHorizontalDoor(Door, InteractableMixin):
+    def __init__(self, x, y, open_direction=1, reading_time=8.4, name="红色水平门"):
+        Door.__init__(self)
+        InteractableMixin.init_interactable(self, reading_time=reading_time, still_required=0.2, range_dist=80.0)
+        self.name = name
+        self.width = 80
+        self.height = 30 * (1/3)
+        self.x = x
+        self.y = y
+        self.is_open = False
+        self.open_angle = 0
+        self.target_angle = 0
+        self.speed = 90
+        self.open_direction = open_direction
+        self.has_been_opened = False
+        self.show_message = None
+        self._message_shown = False
+        self.pivot_x = x
+        self.pivot_y = y + self.height / 2
+        self.local_points = [
+            (0, -self.height/2),
+            (self.width, -self.height/2),
+            (self.width, self.height/2),
+            (0, self.height/2)
+        ]
+        self.handle_local = (self.width/2, 0)
+        self.gap_rect = pygame.Rect(x, y, self.width, self.height)
+        self.collision_polygon = []
+        self.update_collision()
+        self.reward_callback = None
+
+    def update_collision(self):
+        angle_rad = math.radians(self.open_angle)
+        cos_a, sin_a = math.cos(angle_rad), math.sin(angle_rad)
+        self.collision_polygon = []
+        for lx, ly in self.local_points:
+            rx = lx * cos_a - ly * sin_a
+            ry = lx * sin_a + ly * cos_a
+            self.collision_polygon.append((self.pivot_x + rx, self.pivot_y + ry))
+
+    def update(self, dt, player_rect=None, keys_collected=0, debug_vars=None):
+        if abs(self.open_angle - self.target_angle) > 0.5:
+            direction = 1 if self.target_angle > self.open_angle else -1
+            self.open_angle += direction * self.speed * dt
+            if self.open_direction == 1:
+                self.open_angle = max(0, min(90, self.open_angle))
+            else:
+                self.open_angle = max(-90, min(0, self.open_angle))
+        else:
+            self.open_angle = self.target_angle
+        self.update_collision()
+
+        if self.has_been_opened or player_rect is None:
+            return
+
+        current_pos = (player_rect.centerx, player_rect.centery)
+        dist = math.hypot(current_pos[0] - self.pivot_x, current_pos[1] - self.pivot_y)
+        in_range = dist <= self.range_dist
+        if not in_range:
+            self._message_shown = False
+            self.cancel_interact()
+            return
+
+        if keys_collected < 3:
+            self.cancel_interact()
+            if not self._message_shown and self.show_message is not None:
+                missing = 3 - keys_collected
+                self.show_message(f"缺{missing}把钥匙")
+                self._message_shown = True
+            return
+
+        self._message_shown = False
+        def on_complete():
+            if not self.is_open:
+                self.is_open = True
+                self.target_angle = 90 * self.open_direction
+                self.has_been_opened = True
+                if iron_door_sound:
+                    iron_door_sound.play()
+                if self.reward_callback is not None:
+                    self.reward_callback(random.randint(200, 300), "开门")
+        self.update_interaction(dt, player_rect, self.pivot_x, self.pivot_y, on_complete, debug_vars)
+
+    def check_collision(self, player_rect):
+        if not self.collision_polygon:
+            return False, 0, (0, 0)
+        return sat_collision(get_rect_vertices(player_rect), self.collision_polygon)
+
+    def draw(self, screen, camera_offset):
+        if len(self.collision_polygon) >= 3:
+            screen_pts = [(wx - camera_offset.x, wy - camera_offset.y) for wx, wy in self.collision_polygon]
+            pygame.draw.polygon(screen, (220, 40, 40), screen_pts)
+            pygame.draw.polygon(screen, (180, 20, 20), screen_pts, 2)
+        angle_rad = math.radians(self.open_angle)
+        cos_a, sin_a = math.cos(angle_rad), math.sin(angle_rad)
+        lx, ly = self.handle_local
+        rx = lx * cos_a - ly * sin_a
+        ry = lx * sin_a + ly * cos_a
+        sx, sy = self.pivot_x + rx - camera_offset.x, self.pivot_y + ry - camera_offset.y
+        pygame.draw.circle(screen, (255, 255, 0), (int(sx), int(sy)), 4)
+        draw_progress_bar(screen, self.pivot_x, self.pivot_y, self.progress, camera_offset)
+
+# ==================== 逃生信标 ====================
+class EscapeBeacon:
+    def __init__(self, x, y, radius=50):
+        self.x = x
+        self.y = y
+        self.base_radius = radius
+        self.waves = []
+        self.spawn_timer = 0.0
+        self.wave_interval = 0.3
+        self.wave_speed = 80
+        self.max_wave_radius = radius * 2
+
+    def update(self, dt):
+        self.spawn_timer += dt
+        if self.spawn_timer >= self.wave_interval:
+            self.spawn_timer = 0
+            self.waves.append([0.0, 255, self.max_wave_radius])
+        for wave in self.waves[:]:
+            wave[0] += self.wave_speed * dt
+            progress = wave[0] / wave[2]
+            wave[1] = int(255 * (1 - progress))
+            if wave[0] >= wave[2] or wave[1] <= 0:
+                self.waves.remove(wave)
+
+    def check_collision(self, player_rect):
+        center_x = player_rect.centerx
+        center_y = player_rect.centery
+        dist = math.hypot(center_x - self.x, center_y - self.y)
+        return dist <= self.base_radius
+
+    def draw(self, screen, camera_offset):
+        sx = self.x - camera_offset.x
+        sy = self.y - camera_offset.y
+        for radius, alpha, _ in sorted(self.waves, key=lambda w: w[0]):
+            if alpha <= 0:
+                continue
+            wave_surf = pygame.Surface((radius*2+4, radius*2+4), pygame.SRCALPHA)
+            color = (80, 160, 255, alpha)
+            pygame.draw.circle(wave_surf, color, (int(radius)+2, int(radius)+2), int(radius))
+            if alpha > 30:
+                edge_color = (180, 220, 255, min(alpha+50, 255))
+                pygame.draw.circle(wave_surf, edge_color, (int(radius)+2, int(radius)+2), int(radius), 2)
+            screen.blit(wave_surf, (sx - radius - 2, sy - radius - 2))
+        base_surf = pygame.Surface((self.base_radius*2, self.base_radius*2), pygame.SRCALPHA)
+        pygame.draw.circle(base_surf, (40, 120, 240, 220), (self.base_radius, self.base_radius), self.base_radius-10)
+        pygame.draw.circle(base_surf, (70, 150, 255, 180), (self.base_radius, self.base_radius), self.base_radius-5)
+        pygame.draw.circle(base_surf, (130, 200, 255, 120), (self.base_radius, self.base_radius), self.base_radius)
+        pygame.draw.circle(base_surf, (200, 230, 255, 255), (self.base_radius, self.base_radius), 6)
+        screen.blit(base_surf, (sx - self.base_radius, sy - self.base_radius))
+
+# ==================== QTE锁 ====================
+class QTELock:
+    def __init__(self, x, y, width=80, height=100, unlock_time=40.0, range_dist=80.0):
+        self.knockback_vector = None
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.base_unlock_time = unlock_time
+        self.current_unlock_time = unlock_time
+        self.range_dist = range_dist
+        self.progress = 0.0
+        self.is_unlocked = False
+        self.rotation_angle = 0.0
+        self.rotation_speed = 3.0
+        self.in_range = False
+        self.state = 'idle'
+        self.calibrate_timer = 0.0
+        self.calibrate_interval = random.uniform(5.0, 10.0)
+        self.green_zone_angle = 225.0
+        self.green_zone_span = 60.0
+        self.success_zone_span = 20.0
+        self.pointer_angle = 0.0
+        self.pointer_speed = 200.0
+        self.pointer_accumulated_angle = 0.0
+        self.max_rotate_angle = 720.0
+        self.calibration_success = False
+        self.calibration_failed = False
+        self.calibration_result_timer = 0.0
+        self.rect = pygame.Rect(x - width // 2, y - height // 2, width, height)
+        self.reward_callback = None
+
+    def set_reward_callback(self, callback):
+        self.reward_callback = callback
+
+    def update(self, dt, player_rect, player, keys_collected, debug_vars=None):
+        if self.is_unlocked:
+            return
+        if keys_collected >= 3:
+            self.state = 'idle'
+            return
+        lock_center = pygame.Vector2(self.x, self.y)
+        player_center = pygame.Vector2(player_rect.center)
+        dist = lock_center.distance_to(player_center)
+        self.in_range = dist <= self.range_dist
+
+        if self.state == 'idle' and self.in_range:
+            self.state = 'reading'
+            self.calibrate_timer = 0.0
+            self.calibrate_interval = random.uniform(5.0, 10.0)
+        if self.state == 'reading':
+            if self.in_range:
+                if debug_vars and debug_vars.get('fast_interact', False):
+                    self.progress = 1.0
+                else:
+                    self.progress = min(1.0, self.progress + dt / self.current_unlock_time)
+                self.rotation_angle += self.rotation_speed * dt
+                self.rotation_angle %= (2 * math.pi)
+                if self.progress >= 1.0:
+                    self.is_unlocked = True
+                    self.state = 'unlocked'
+                    if self.reward_callback is not None:
+                        self.reward_callback(random.randint(200, 250))
+                    return
+                self.calibrate_timer += dt
+                if self.calibrate_timer >= self.calibrate_interval:
+                    self.calibrate_timer = 0.0
+                    self.calibrate_interval = random.uniform(5.0, 10.0)
+                    self.state = 'calibrating'
+                    self.pointer_angle = random.uniform(0, 360)
+                    self.pointer_accumulated_angle = 0.0
+                    self.calibration_success = False
+                    self.calibration_failed = False
+        elif self.state == 'calibrating':
+            delta_angle = self.pointer_speed * dt
+            self.pointer_angle = (self.pointer_angle - delta_angle) % 360
+            self.pointer_accumulated_angle += delta_angle
+            if self.pointer_accumulated_angle >= self.max_rotate_angle:
+                self.calibration_failed = True
+                self.calibration_result_timer = 1.0
+                self.current_unlock_time += 1.0
+                self.state = 'idle'
+                if lock_fail_sound:
+                    lock_fail_sound.play()
+                if player is not None:
+                    if not (hasattr(player, 'debug_vars') and player.debug_vars.get('god_mode', False)):
+                        player.take_damage(10)
+                if player_rect is not None:
+                    lock_center = pygame.Vector2(self.x, self.y)
+                    player_center = pygame.Vector2(player_rect.center)
+                    dir_vec = player_center - lock_center
+                    if dir_vec.length() > 0:
+                        dir_vec = dir_vec.normalize()
+                    else:
+                        dir_vec = pygame.Vector2(1, 0)
+                    self.knockback_vector = dir_vec * 50
+        if self.calibration_result_timer > 0:
+            self.calibration_result_timer -= dt
+
+    def handle_calibration_click(self, screen_pos, player_rect=None, player=None):
+        if self.state != 'calibrating':
+            return False
+        
+        pointer_angle = self.pointer_angle % 360
+        half_span = self.green_zone_span / 2.0
+        green_start = (self.green_zone_angle - half_span) % 360
+        green_end = (self.green_zone_angle + half_span) % 360
+        
+        def angle_in_range(ang, start, end):
+            if start < end:
+                return start <= ang <= end
+            else:
+                return ang >= start or ang <= end
+        
+        if angle_in_range(pointer_angle, green_start, green_end):
+            half_success = self.success_zone_span / 2.0
+            success_start = (self.green_zone_angle - half_success) % 360
+            success_end = (self.green_zone_angle + half_success) % 360
+            is_perfect = angle_in_range(pointer_angle, success_start, success_end)
+            
+            self.calibration_success = True
+            self.calibration_result_timer = 1.0
+            self.state = 'reading'
+            self.calibrate_timer = 0.0
+            if calibration_success_sound:
+                calibration_success_sound.play()
+            
+            if self.reward_callback is not None:
+                coins_reward = random.randint(40, 50) if is_perfect else random.randint(20, 30)
+                self.reward_callback(coins_reward, "开锁")
+            return True
+        else:
+            self.calibration_failed = True
+            self.calibration_result_timer = 1.0
+            self.current_unlock_time += 1.0
+            self.state = 'idle'
+            if lock_fail_sound:
+                lock_fail_sound.play()
+            if player is not None:
+                # 需要判断无敌模式，但这里无法直接访问debug_vars
+                # 我们可以在调用 handle_calibration_click 时传入 debug_vars 并在此判断
+                # 简便方法：假设 player 对象有一个 debug_vars 属性（可以在 Player 类中增加）
+                # 目前我们暂时不做处理，或您希望我完整重构这部分？
+                # 为快速修复，我建议在 run_game 调用 handle_calibration_click 前判断 god_mode
+                pass
+            if player_rect is not None:
+                lock_center = pygame.Vector2(self.x, self.y)
+                player_center = pygame.Vector2(player_rect.center)
+                dir_vec = player_center - lock_center
+                if dir_vec.length() > 0:
+                    dir_vec = dir_vec.normalize()
+                else:
+                    dir_vec = pygame.Vector2(1, 0)
+                self.knockback_vector = dir_vec * 50
+            return False
+
+    def check_collision(self, player_rect):
+        return sat_collision(get_rect_vertices(player_rect), get_rect_vertices(self.rect))
+
+    def draw(self, screen, camera_offset):
+        sx = self.x - camera_offset.x
+        sy = self.y - camera_offset.y
+        lock_rect = pygame.Rect(sx - self.width // 2, sy - self.height // 2, self.width, self.height)
+        pygame.draw.rect(screen, (220, 180, 0), lock_rect)
+        pygame.draw.rect(screen, (180, 140, 0), lock_rect, 2)
+        wheel_radius = 25
+        wheel_center_x = sx
+        wheel_center_y = sy - self.height // 2 + self.height // 3 + 25
+        pygame.draw.circle(screen, (80, 60, 30), (wheel_center_x, wheel_center_y), wheel_radius, 3)
+        pygame.draw.circle(screen, (120, 90, 40), (wheel_center_x, wheel_center_y), wheel_radius - 6, 2)
+        pygame.draw.circle(screen, (60, 40, 20), (wheel_center_x, wheel_center_y), 4)
+        spoke_count = 8
+        for i in range(spoke_count):
+            base_angle = self.rotation_angle + i * (2 * math.pi / spoke_count)
+            end_x = wheel_center_x + math.cos(base_angle) * (wheel_radius - 3)
+            end_y = wheel_center_y - math.sin(base_angle) * (wheel_radius - 3)
+            pygame.draw.line(screen, (100, 70, 30), (wheel_center_x, wheel_center_y), (end_x, end_y), 2)
+        for i in range(8):
+            angle = self.rotation_angle + i * (2 * math.pi / 8)
+            dot_x = wheel_center_x + math.cos(angle) * (wheel_radius + 2)
+            dot_y = wheel_center_y - math.sin(angle) * (wheel_radius + 2)
+            pygame.draw.circle(screen, (160, 120, 40), (int(dot_x), int(dot_y)), 3)
+        if self.is_unlocked:
+            return
+        if self.in_range and self.progress > 0:
+            bar_width = 90
+            bar_height = 12
+            bar_x = sx - bar_width // 2
+            bar_y = sy - self.height // 2 - bar_height - 10
+            pygame.draw.rect(screen, (255, 255, 255), (bar_x, bar_y, bar_width, bar_height))
+            fill_width = int(bar_width * self.progress)
+            if fill_width > 0:
+                pygame.draw.rect(screen, (0, 0, 0), (bar_x, bar_y, fill_width, bar_height))
+            pygame.draw.rect(screen, (0, 0, 0), (bar_x, bar_y, bar_width, bar_height), 1)
+        if self.state == 'calibrating':
+            mask = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
+            mask.fill((0, 0, 0, 180))
+            screen.blit(mask, (0, 0))
+            center_x = GameConfig.WINDOW_WIDTH // 2
+            center_y = GameConfig.WINDOW_HEIGHT // 2
+            calib_radius = 100
+            pygame.draw.circle(screen, (80, 80, 80), (center_x, center_y), calib_radius, 8)
+
+            half_span = self.green_zone_span / 2.0
+            start_rad = math.radians(self.green_zone_angle - half_span)
+            end_rad = math.radians(self.green_zone_angle + half_span)
+            arc_points = []
+            steps = 30
+            for i in range(steps + 1):
+                t = i / steps
+                ang = start_rad + t * (end_rad - start_rad)
+                px = center_x + math.cos(ang) * calib_radius
+                py = center_y - math.sin(ang) * calib_radius
+                arc_points.append((px, py))
+            if len(arc_points) > 1:
+                pygame.draw.lines(screen, (144, 238, 144), False, arc_points, 6)
+
+            half_success = self.success_zone_span / 2.0
+            success_start = math.radians(self.green_zone_angle - half_success)
+            success_end = math.radians(self.green_zone_angle + half_success)
+            success_points = []
+            for i in range(steps + 1):
+                t = i / steps
+                ang = success_start + t * (success_end - success_start)
+                px = center_x + math.cos(ang) * calib_radius
+                py = center_y - math.sin(ang) * calib_radius
+                success_points.append((px, py))
+            if len(success_points) > 1:
+                pygame.draw.lines(screen, (0, 255, 0), False, success_points, 8)
+
+            pointer_angle_rad = math.radians(self.pointer_angle)
+            pointer_x = center_x + math.cos(pointer_angle_rad) * (calib_radius - 15)
+            pointer_y = center_y - math.sin(pointer_angle_rad) * (calib_radius - 15)
+            pygame.draw.line(screen, (255, 255, 255), (center_x, center_y), (pointer_x, pointer_y), 4)
+
+            font = get_font(28)
+            text = font.render("点击绿色区域校准", True, (255, 255, 255))
+            text_rect = text.get_rect(center=(center_x, center_y + calib_radius + 40))
+            screen.blit(text, text_rect)
+
+            if self.calibration_result_timer > 0:
+                if self.calibration_success:
+                    result_text = font.render("成功！", True, (0, 255, 0))
+                elif self.calibration_failed:
+                    result_text = font.render("失败 +1s", True, (255, 0, 0))
+                else:
+                    result_text = None
+                if result_text:
+                    result_rect = result_text.get_rect(center=(center_x, center_y - calib_radius - 40))
+                    screen.blit(result_text, result_rect)
+
+# ==================== 宝箱 ====================
+class Chest(InteractableMixin):
+    def __init__(self, x, y, size=GameConfig.CHEST_SIZE):
+        self.x = x
+        self.y = y
+        self.size = size
+        self.rect = pygame.Rect(x - size//2, y - size//2, size, size)
+        self.vertices = get_rect_vertices(self.rect)
+        self.is_open = False
+        self.opened = False
+        self.init_interactable(reading_time=5.0, still_required=0.2, range_dist=60.0)
+        self.collision_polygon = self.vertices
+        self.reward_callback = None
+
+    def update(self, dt, player_rect, debug_vars=None):
+        if self.is_open or self.opened:
+            return
+        def on_complete():
+            self.finish_open()
+        self.update_interaction(dt, player_rect, self.x, self.y, on_complete, debug_vars)
+
+    def finish_open(self):
+        self.is_open = True
+        self.opened = True
+        self.cancel_interact()
+        if chest_open_sound:
+            chest_open_sound.play()
+        if self.reward_callback is not None:
+            self.reward_callback(random.randint(140, 160), "开箱")
+
+    def set_reward_callback(self, callback):
+        self.reward_callback = callback
+
+    def check_collision(self, player_rect):
+        if self.is_open or self.opened:
+            return False, 0, (0, 0)
+        return sat_collision(get_rect_vertices(player_rect), self.vertices)
+
+    def draw(self, screen, camera_offset):
+        if self.opened:
+            return
+        r = self.rect.move(-camera_offset.x, -camera_offset.y)
+        wood_color = (139, 90, 43)
+        wood_dark = (101, 67, 33)
+        pygame.draw.rect(screen, wood_color, r)
+        pygame.draw.rect(screen, wood_dark, r, 3)
+        cx, cy = r.centerx, r.centery
+        pygame.draw.line(screen, wood_dark, (r.left+5, cy-5), (r.right-5, cy-5), 2)
+        pygame.draw.line(screen, wood_dark, (r.left+5, cy+5), (r.right-5, cy+5), 2)
+        pygame.draw.circle(screen, (160, 100, 60), (cx, cy), 6)
+        draw_progress_bar(screen, self.x, self.y, self.progress, camera_offset, bar_width=70)
+
+# ==================== 治疗区域 ====================
+class HealingZone:
+    def __init__(self, x, y, size=50, heal_amount=5, heal_interval=0.1):
+        self.x = x
+        self.y = y
+        self.size = size
+        self.rect = pygame.Rect(x - size//2, y - size//2, size, size)
+        self.heal_amount = heal_amount
+        self.heal_interval = heal_interval
+        self.heal_timer = 0.0
+
+    def update(self, dt, player):
+        player_center = pygame.Vector2(player.rect.center)
+        zone_center = pygame.Vector2(self.x, self.y)
+        dist = player_center.distance_to(zone_center)
+        in_range = dist <= self.size//2 + player.size//2
+
+        if in_range and player.hp < player.max_hp:
+            self.heal_timer += dt
+            while self.heal_timer >= self.heal_interval:
+                player.hp = min(player.max_hp, player.hp + self.heal_amount)
+                self.heal_timer -= self.heal_interval
+        else:
+            self.heal_timer = 0.0
+
+    def draw(self, screen, camera_offset):
+        sx = self.x - camera_offset.x
+        sy = self.y - camera_offset.y
+        s = pygame.Surface((self.size, self.size), pygame.SRCALPHA)
+        s.fill((0, 255, 100, 80))
+        screen.blit(s, (sx - self.size//2, sy - self.size//2))
+        color = (50, 200, 50)
+        pygame.draw.rect(screen, color, (sx - self.size//4, sy - 2, self.size//2, 4))
+        pygame.draw.rect(screen, color, (sx - 2, sy - self.size//4, 4, self.size//2))
+
+# ==================== 火箭弹 ====================
+class Rocket:
+    def __init__(self, x, y, direction: pygame.Vector2, speed, max_distance, infinite_range, bullet_tracking=False, is_enemy=False):
+        self.x = x
+        self.y = y
+        self.vx = direction.x * speed
+        self.vy = direction.y * speed
+        self.distance_traveled = 0
+        self.active = True
+        self.exploded = False
+        self.explosion_timer = 0
+        self.explosion_radius = 0
+        self.max_explosion_radius = 100
+        self.explosion_alpha = 255
+        self.explosion_duration = 20
+        self.explode_sound_played = False
+        self.max_distance = float('inf') if infinite_range else max_distance
+        self.damage_dealt = False
+        self.orbit_angle = 0.0
+        self.orbit_speed = 0.10
+        self.orbit_radius = 12
+        self.bullet_tracking = bullet_tracking
+        self.is_enemy = is_enemy
+
+    def update(self, enemies=None):
+        if self.exploded:
+            self.explosion_timer -= 1
+            if self.explosion_timer <= 0:
+                self.active = False
+                return
+            progress = 1 - self.explosion_timer / self.explosion_duration
+            self.explosion_radius = int(5 + (self.max_explosion_radius - 5) * progress)
+            self.explosion_alpha = int(255 * (1 - progress))
+            return
+        if self.bullet_tracking and enemies:
+            nearest_enemy = None
+            min_dist_sq = float('inf')
+            for enemy in enemies:
+                if enemy.dead or enemy.downed:
+                    continue
+                dx = enemy.pos.x - self.x
+                dy = enemy.pos.y - self.y
+                dist_sq = dx * dx + dy * dy
+                if dist_sq < min_dist_sq:
+                    min_dist_sq = dist_sq
+                    nearest_enemy = enemy
+            if nearest_enemy:
+                to_target = pygame.Vector2(nearest_enemy.pos.x - self.x, nearest_enemy.pos.y - self.y)
+                if to_target.length() > 0:
+                    to_target.normalize_ip()
+                    speed = math.hypot(self.vx, self.vy)
+                    self.vx = to_target.x * speed
+                    self.vy = to_target.y * speed
+        self.x += self.vx
+        self.y += self.vy
+        self.distance_traveled += math.hypot(self.vx, self.vy)
+        if (self.distance_traveled >= self.max_distance or
+            self.x < 0 or self.x > GameConfig.WORLD_WIDTH or
+            self.y < 0 or self.y > GameConfig.WORLD_HEIGHT):
+            self.explode()
+        self.orbit_angle += self.orbit_speed
+        if self.orbit_angle > 2 * math.pi:
+            self.orbit_angle -= 2 * math.pi
+
+    def explode(self):
+        if self.exploded:
+            return
+        self.exploded = True
+        self.explosion_timer = self.explosion_duration
+        self.explosion_radius = 5
+        self.explosion_alpha = 255
+        if not self.explode_sound_played and rocket_explode_sound:
+            rocket_explode_sound.play()
+            self.explode_sound_played = True
+
+    def draw(self, surface, camera):
+        if not self.active:
+            return
+        ox, oy = camera.offset
+        screen_x = self.x - ox
+        screen_y = self.y - oy
+        if self.exploded:
+            rad = self.explosion_radius
+            alpha = self.explosion_alpha
+            if rad <= 0:
+                return
+            surf_outer = pygame.Surface((rad*2, rad*2), pygame.SRCALPHA)
+            if self.is_enemy:
+                outer_color = (255, 80, 0, alpha // 2)        # 橙红色外圈
+            else:
+                outer_color = (0, 80, 255, alpha // 2)        # 蓝色外圈
+            pygame.draw.circle(surf_outer, outer_color, (rad, rad), rad)
+            surface.blit(surf_outer, (screen_x - rad, screen_y - rad))
+            inner_rad = max(3, rad // 2)
+            surf_inner = pygame.Surface((inner_rad*2, inner_rad*2), pygame.SRCALPHA)
+            if self.is_enemy:
+                inner_color = (255, 100, 100, alpha)          # 红色内圈
+            else:
+                inner_color = (0, 160, 255, alpha)            # 蓝色内圈
+            pygame.draw.circle(surf_inner, inner_color, (inner_rad, inner_rad), inner_rad)
+            surface.blit(surf_inner, (screen_x - inner_rad, screen_y - inner_rad))
+            core_rad = max(2, rad // 4)
+            if self.is_enemy:
+                core_color = (255, 200, 100)                  # 橙黄核心
+            else:
+                core_color = (180, 220, 255)                  # 淡蓝核心
+            pygame.draw.circle(surface, core_color, (int(screen_x), int(screen_y)), core_rad)
+        else:
+            if self.is_enemy:
+                # 敌人火箭弹：红色系
+                main_color = (255, 100, 100)
+                trail_color = (200, 80, 80)
+            else:
+                # 玩家火箭弹：蓝色系
+                main_color = (100, 200, 255)
+                trail_color = (150, 200, 255)
+            pygame.draw.circle(surface, main_color, (int(screen_x), int(screen_y)), 6)
+            for i in range(3):
+                angle = self.orbit_angle + i * (2 * math.pi / 3)
+                offset_x = math.cos(angle) * self.orbit_radius
+                offset_y = math.sin(angle) * self.orbit_radius
+                px = screen_x + offset_x
+                py = screen_y + offset_y
+                pygame.draw.circle(surface, trail_color, (int(px), int(py)), 3)
+# ==================== 医疗包投掷物 ====================
+class MedkitProjectile:
+    def __init__(self, x, y, target_pos, speed=350, gravity=600, radius_multiplier=1, heal_amount=100):
+        self.start_pos = pygame.Vector2(x, y)
+        self.pos = pygame.Vector2(x, y)
+        self.target_pos = pygame.Vector2(target_pos)
+        self.active = True
+        self.landed = False
+        self.heal_radius = 80 * radius_multiplier
+        self.heal_applied = False
+        self.show_radius_timer = 1.5
+        self.radius_duration = 1.5
+        self.heal_amount = 100  # 强制覆盖为100，忽略传入参数
+        self.speed = speed      # 保存速度值用于后续飞行时间计算
+        self.age = 0.0          # 飞行时间计时器
+        
+        # 抛物线参数
+        self.gravity = gravity
+        to_target = self.target_pos - self.start_pos
+        dist = to_target.length()
+        if dist > 0:
+            horiz_dir = to_target.normalize()
+            t = dist / self.speed
+            MIN_FLIGHT_TIME = 1.0
+            if t < MIN_FLIGHT_TIME:
+                t = MIN_FLIGHT_TIME
+                # 距离很近时，调整水平速度，使水平位移匹配目标距离
+                adjusted_speed = dist / t
+                self.vx = horiz_dir.x * adjusted_speed
+            else:
+                self.vx = horiz_dir.x * self.speed
+            dy = self.target_pos.y - self.start_pos.y
+            actual_gravity = self.gravity * 1.2
+            self.vy = (dy - 0.5 * actual_gravity * t * t) / t
+            self.gravity = actual_gravity
+        else:
+            self.vx = 0
+            self.vy = -self.speed * 0.8
+        
+    def update(self, dt, player, teammates=None):
+        if not self.active:
+            return
+            
+        # 累积飞行时间
+        if not self.landed:
+            self.age += dt
+
+        # 只有落地后治疗圈计时器才减少
+        if self.landed:
+            self.show_radius_timer -= dt
+            if self.show_radius_timer <= 0:
+                self.active = False
+                return
+            
+        if not self.landed:
+            # 应用重力
+            self.vy += self.gravity * dt
+            # 更新位置
+            self.pos.x += self.vx * dt
+            self.pos.y += self.vy * dt
+            
+            # 检查是否落地
+            to_target = self.target_pos - self.pos
+            dist_to_target = to_target.length()
+            
+            # 计算速度方向与目标方向的点积，判断是否正在远离目标
+            vel = pygame.Vector2(self.vx, self.vy)
+            if vel.length() > 1 and dist_to_target > 1:
+                vel_dir = vel.normalize()
+                to_target_dir = to_target.normalize()
+                dot = vel_dir.dot(to_target_dir)
+                passed_target = dot < -0.5
+            else:
+                passed_target = False
+            
+            # 落地条件：距离小于15像素，或已飞过目标且高度不低于目标太多，同时确保至少飞行了 1 秒
+            min_flight_ok = self.age >= 1.0
+            if min_flight_ok and (dist_to_target < 15 or (passed_target and self.pos.y >= self.target_pos.y - 5)):
+                self.pos = self.target_pos.copy()
+                self.landed = True
+                self.show_radius_timer = 0.0   # 治疗圈立即消失
+                self.active = False            # 投掷物立即失效
+                # 治疗玩家自身
+                if player and not self.heal_applied:
+                    dist_to_player = player.pos.distance_to(self.pos)
+                    if dist_to_player <= self.heal_radius:
+                        player.hp = min(player.max_hp, player.hp + 100)
+                        player.heal_delay_timer = GameConfig.HEAL_DELAY
+                        player.heal_cooldown = 0.0
+                        if player.downed:
+                            player.downed = False
+                    # 治疗倒地的队友
+                    if teammates is not None:
+                        for mate in teammates:
+                            if mate.downed:
+                                dist_to_mate = mate.pos.distance_to(self.pos)
+                                if dist_to_mate <= self.heal_radius:
+                                    mate.hp = min(mate.max_hp, mate.hp + 100)
+                                    mate.heal_delay_timer = GameConfig.HEAL_DELAY
+                                    mate.heal_cooldown = 0.0
+                                    mate.downed = False
+                    self.heal_applied = True
+                    
+    def draw(self, surface, camera):
+        if not self.active:
+            return
+        ox, oy = camera.offset
+        screen_x = self.pos.x - ox
+        screen_y = self.pos.y - oy
+        
+        # 绘制飞行中的医疗包（只要未落地）
+        if not self.landed:
+            # 白色方形医疗箱（放大一圈）
+            box_width = 24
+            box_height = 20
+            box_rect = pygame.Rect(screen_x - box_width//2, screen_y - box_height//2, box_width, box_height)
+            # 白色箱体
+            pygame.draw.rect(surface, (255, 255, 255), box_rect)
+            pygame.draw.rect(surface, (100, 100, 100), box_rect, 2)
+            # 中间红十字（相应放大）
+            cross_thick = 5
+            cross_color = (255, 0, 0)
+            # 横向
+            pygame.draw.rect(surface, cross_color, (screen_x - 8, screen_y - 2, 16, cross_thick))
+            # 纵向
+            pygame.draw.rect(surface, cross_color, (screen_x - 2, screen_y - 8, cross_thick, 16))
+            
+            # 轨迹粒子（保留）
+            if abs(self.vx) + abs(self.vy) > 1:
+                vel_dir = pygame.Vector2(self.vx, self.vy).normalize()
+            else:
+                vel_dir = pygame.Vector2(0, -1)
+            trail_color = (200, 200, 200)
+            for i in range(3):
+                offset = i * 8
+                trail_x = screen_x - vel_dir.x * offset
+                trail_y = screen_y - vel_dir.y * offset
+                alpha = max(0, 200 - i * 60)
+                trail_surf = pygame.Surface((6, 6), pygame.SRCALPHA)
+                pygame.draw.circle(trail_surf, (*trail_color, alpha), (3, 3), 3)
+                surface.blit(trail_surf, (trail_x - 3, trail_y - 3))
+        
+        # 绘制治疗圈（始终在目标位置，只要计时器大于0）
+        if self.show_radius_timer > 0:
+            screen_x = self.target_pos.x - ox
+            screen_y = self.target_pos.y - oy
+            radius = int(self.heal_radius)
+            circle_surf = pygame.Surface((radius*2, radius*2), pygame.SRCALPHA)
+            pygame.draw.circle(circle_surf, (0, 255, 0, 120), (radius, radius), radius, 0)
+            surface.blit(circle_surf, (screen_x - radius, screen_y - radius))
+
+# ==================== 迫击炮弹 ====================
+class MortarProjectile:
+    def __init__(self, x, y, target_pos, damage=99, explosion_radius=160, range_multiplier=1.0, tracking_target=None, bullet_tracking=False):
+        self.start_pos = pygame.Vector2(x, y)
+        self.pos = pygame.Vector2(x, y)
+        self.target_pos = pygame.Vector2(target_pos)
+        self.active = True
+        self.landed = False
+        self.exploded = False
+        self.explosion_timer = 0
+        self.explosion_duration = 15
+        base_radius = explosion_radius
+        self.explosion_radius = int(base_radius * range_multiplier)
+        self.damage = damage
+        base_speed = 400
+        self.speed = base_speed * range_multiplier
+        self.gravity = 600
+        self.age = 0.0
+        self.vx = 0
+        self.vy = 0
+        self.explode_sound_played = False
+        self.tracking_target = tracking_target  # 跟踪目标（敌人对象）
+        self.bullet_tracking = bullet_tracking
+       
+
+        to_target = self.target_pos - self.start_pos
+        dist = to_target.length()
+        if dist > 0:
+            horiz_dir = to_target.normalize()
+            t = dist / self.speed
+            MIN_FLIGHT_TIME = 1.2
+            if t < MIN_FLIGHT_TIME:
+                t = MIN_FLIGHT_TIME
+                adjusted_speed = dist / t
+                self.vx = horiz_dir.x * adjusted_speed
+            else:
+                self.vx = horiz_dir.x * self.speed
+            dy = self.target_pos.y - self.start_pos.y
+            actual_gravity = self.gravity * 1.2
+            self.vy = (dy - 0.5 * actual_gravity * t * t) / t
+            self.gravity = actual_gravity
+        else:
+            self.vx = 0
+            self.vy = -self.speed * 0.8
+
+    def update(self, dt, player=None, enemies=None, walls=None, doors=None, chests=None, blocks=None, debug_vars=None):
+        if not self.active:
+            return
+        if self.landed and not self.exploded:
+            self.exploded = True
+            self.explosion_timer = self.explosion_duration
+            if mortar_explode_sound and not self.explode_sound_played:
+                mortar_explode_sound.play()
+                self.explode_sound_played = True
+            # 伤害判定
+            if enemies:
+                for enemy in enemies[:]:
+                    if enemy.dead or enemy.downed:
+                        continue
+                    dist = enemy.pos.distance_to(self.target_pos)
+                    if dist <= self.explosion_radius:
+                        enemy.take_damage(self.damage)
+                        # 计算击退方向，避免除零
+                        diff = enemy.pos - self.target_pos
+                        if diff.length() > 1e-6:
+                            knockback = diff.normalize() * 300
+                        else:
+                            knockback = pygame.Vector2(0, -1) * 300   # 默认向上击退
+                        enemy.recoil_vel += knockback
+                        enemy.recoil_timer = max(enemy.recoil_timer, 0.3)
+            # 对玩家伤害（如果有自伤开关）
+            if player and debug_vars and debug_vars.get('enemy_self_damage', False):
+                dist = player.pos.distance_to(self.target_pos)
+                if dist <= self.explosion_radius and not player.downed and not debug_vars.get('god_mode', False):
+                    player.take_damage(self.damage)
+                    diff = player.pos - self.target_pos
+                    if diff.length() > 1e-6:
+                        knockback = diff.normalize() * 300
+                    else:
+                        knockback = pygame.Vector2(0, -1) * 300
+                    player.recoil_vel += knockback
+                    player.recoil_timer = max(player.recoil_timer, 0.3)
+            # 摧毁阻挡箱
+            if blocks:
+                for block in blocks[:]:
+                    if block.active and not block.destroyed:
+                        dist = pygame.Vector2(block.pos.x, block.pos.y).distance_to(self.target_pos)
+                        if dist <= self.explosion_radius:
+                            block.take_damage(self.damage)
+            return
+
+        if self.exploded:
+            self.explosion_timer -= 1
+            if self.explosion_timer <= 0:
+                self.active = False
+            return
+
+        # 飞行中
+        self.age += dt
+        # 子弹跟踪：如果开启且有有效跟踪目标，则动态更新目标位置
+        if self.bullet_tracking and self.tracking_target is not None:
+            if hasattr(self.tracking_target, 'pos') and not (hasattr(self.tracking_target, 'dead') and self.tracking_target.dead):
+                new_target = self.tracking_target.pos
+                # 重新计算速度方向（简化：重新执行初始化逻辑？性能考虑，只调整目标点并重新计算水平速度）
+                to_new = new_target - self.pos
+                if to_new.length() > 0:
+                    horiz_dir = to_new.normalize()
+                    self.vx = horiz_dir.x * self.speed
+                self.target_pos = new_target
+        self.vy += self.gravity * dt
+        self.pos.x += self.vx * dt
+        self.pos.y += self.vy * dt
+        to_target = self.target_pos - self.pos
+        dist_to_target = to_target.length()
+        vel = pygame.Vector2(self.vx, self.vy)
+        passed_target = False
+        if vel.length() > 1 and dist_to_target > 1:
+            vel_dir = vel.normalize()
+            to_target_dir = to_target.normalize()
+            if vel_dir.dot(to_target_dir) < -0.5:
+                passed_target = True
+        if self.age >= 1.0 and (dist_to_target < 20 or (passed_target and self.pos.y >= self.target_pos.y - 10)):
+            self.landed = True
+            self.pos = self.target_pos.copy()
+
+    def draw(self, surface, camera):
+        if not self.active:
+            return
+        ox, oy = camera.offset
+        screen_x = self.pos.x - ox
+        screen_y = self.pos.y - oy
+
+        # 未爆炸且未落地时，在目标点绘制爆炸范围预览圈（实心填充）
+        if not self.landed and not self.exploded:
+            preview_radius = self.explosion_radius
+            preview_surf = pygame.Surface((preview_radius*2, preview_radius*2), pygame.SRCALPHA)
+            pygame.draw.circle(preview_surf, (173, 216, 230, 150), 
+                               (preview_radius, preview_radius), preview_radius, 0)
+            surface.blit(preview_surf, 
+                        (self.target_pos.x - ox - preview_radius, 
+                         self.target_pos.y - oy - preview_radius))
+
+        if self.exploded:
+            rad = int(self.explosion_radius * (1 - self.explosion_timer / self.explosion_duration))
+            if rad <= 0:
+                return
+            alpha = int(255 * (self.explosion_timer / self.explosion_duration))
+            surf = pygame.Surface((rad*2, rad*2), pygame.SRCALPHA)
+            pygame.draw.circle(surf, (100, 200, 255, alpha), (rad, rad), rad)
+            surface.blit(surf, (screen_x - rad, screen_y - rad))
+        else:
+            # 绘制炮弹（类似火箭弹但为浅蓝色，放大至半径9）
+            pygame.draw.circle(surface, (150, 200, 255), (int(screen_x), int(screen_y)), 9)
+            # 轨迹粒子（增加至4个，尺寸放大）
+            if abs(self.vx) + abs(self.vy) > 1:
+                vel_dir = pygame.Vector2(self.vx, self.vy).normalize()
+            else:
+                vel_dir = pygame.Vector2(0, -1)
+            for i in range(4):
+                offset = i * 10
+                tx = screen_x - vel_dir.x * offset
+                ty = screen_y - vel_dir.y * offset
+                alpha = max(0, 200 - i*50)
+                trail_surf = pygame.Surface((6,6), pygame.SRCALPHA)
+                pygame.draw.circle(trail_surf, (180, 220, 255, alpha), (3,3), 3)
+                surface.blit(trail_surf, (tx-3, ty-3))
+
+# ==================== 阻挡箱 ====================
+class Block:
+    def __init__(self, x, y, size=90, duration=5.0):
+        self.pos = pygame.Vector2(x, y)
+        self.size = size
+        self.rect = pygame.Rect(0, 0, size, size)
+        self.rect.center = (round(x), round(y))
+        self.max_hp = 100.0
+        self.hp = self.max_hp
+        self.duration = duration
+        self.timer = duration
+        self.active = True
+        self.destroyed = False
+        self.shrink_anim = False
+        self.shrink_timer = 0.0
+        self.shrink_duration = 0.2
+        self.color = (255, 0, 0)  # 纯红色
+
+    def update(self, dt):
+        if not self.active:
+            return
+        if self.destroyed:
+            self.shrink_anim = True
+            self.active = False
+            return
+        # 自动衰减血量
+        self.hp -= (self.max_hp / self.duration) * dt
+        self.timer -= dt
+        if self.hp <= 0 or self.timer <= 0:
+            self.destroyed = True
+            self.shrink_anim = True
+            self.active = False
+            return
+
+    def take_damage(self, amount):
+        if self.destroyed or not self.active:
+            return
+        # 任何伤害立即摧毁阻挡箱
+        self.destroyed = True
+        self.shrink_anim = True
+        self.active = False
+
+    def update_shrink(self, dt):
+        if not self.shrink_anim:
+            return False
+        self.shrink_timer += dt
+        if self.shrink_timer >= self.shrink_duration:
+            return True  # 动画结束，可移除
+        return False
+
+    def get_current_size(self):
+        if not self.shrink_anim:
+            return self.size
+        progress = self.shrink_timer / self.shrink_duration
+        return int(self.size * (1.0 - progress))
+
+    def get_draw_rect(self):
+        current_size = self.get_current_size()
+        return pygame.Rect(0, 0, current_size, current_size)
+
+    def check_collision(self, other_rect):
+        if not self.active:
+            return False, 0, (0, 0)
+        return sat_collision(get_rect_vertices(other_rect), get_rect_vertices(self.rect))
+
+    def draw(self, screen, camera):
+        if not self.active and not self.shrink_anim:
+            return
+        screen_pos = camera.apply(self.pos)
+        x, y = int(screen_pos.x), int(screen_pos.y)
+        current_size = self.get_current_size()
+        half = current_size // 2
+        rect = pygame.Rect(x - half, y - half, current_size, current_size)
+        # 绘制红色方块
+        pygame.draw.rect(screen, self.color, rect)
+        # 绘制血条（仅在未销毁时）
+        if not self.destroyed and self.active:
+            bar_width = current_size
+            bar_height = 6
+            bar_x = x - bar_width // 2
+            bar_y = y - half - 10
+            pygame.draw.rect(screen, (0, 0, 0), (bar_x, bar_y, bar_width, bar_height))
+            fill_width = int(bar_width * (self.hp / self.max_hp))
+            pygame.draw.rect(screen, (0, 255, 0), (bar_x, bar_y, fill_width, bar_height))
+            pygame.draw.rect(screen, (255, 255, 255), (bar_x, bar_y, bar_width, bar_height), 1)
+# ==================== 玩家类 ====================
+class Player:
+    def __init__(self, x, y):
+        self.pos = pygame.Vector2(x, y)
+        self.size = GameConfig.PLAYER_SIZE
+        self.speed = GameConfig.PLAYER_SPEED
+        self.rect = pygame.Rect(0, 0, self.size, self.size)
+        self.rect.center = (round(self.pos.x), round(self.pos.y))
+        self.flip = False
+        self.max_hp = GameConfig.MAX_HP
+        self.hp = GameConfig.MAX_HP
+        self.heal_cooldown = 0.0
+        self.heal_delay_timer = 0.0
+        self.small_iron_key = False
+        self.big_iron_keys = 0
+        self.rockets = []
+        self.current_ammo = GameConfig.MAX_AMMO
+        self.reserve_ammo = 0
+        self.reloading = False
+        self.reload_timer = 0
+        self.reload_start_ammo = 0
+        self.rocket_cooldown = 0
+        self.cool_progress = 0.0
+        self.reload_progress = 0.0
+        self.recoil_vel = pygame.Vector2(0, 0)
+        self.recoil_timer = 0.0
+        self.squat_offset = 0
+        self.squat_timer = 0
+        self.preview_mode = False
+        self.preview_dir = pygame.Vector2(1, 0)
+        self.preview_max_dist = 0
+        self.medkit_preview = False
+        self.medkit_preview_pos = pygame.Vector2(0, 0)
+        self.medkits = []                     # 医疗包投掷物列表
+        self.downed = False                   # 是否倒地
+        self.downed_timer = 0.0               # 倒地计时器
+        self.downed_duration = 5.0            # 倒地持续5秒后死亡
+        self.medkit_cooldown = 0.0            # 医疗包冷却计时器
+        self.medkit_cooldown_duration = 3.0   # 冷却3秒
+        self.pending_heal_requests = []       # 待处理治疗请求列表，每个元素为 (target_pos, heal_radius)
+        # 皮卡车（道具3）状态
+        self.truck_active = False             # 是否处于变身皮卡状态
+        self.truck_timer = 0.0                # 剩余变身时间
+        self.truck_cooldown = 0.0             # 冷却计时器（3秒）
+        self.truck_speed_multiplier = 1.84    # 速度倍率84%提升
+        self.truck_base_duration = 10.0       # 基础持续时间10秒
+        self.truck_cancel_request = False     # 请求取消变身
+        # 阻挡箱（道具4）状态
+        self.block_preview = False            # 是否预览阻挡箱
+        self.block_preview_pos = pygame.Vector2(0, 0)  # 预览位置
+        self.blocks = []                      # 活跃阻挡箱列表
+        self.block_cooldown = 0.0             # 冷却计时器（局内消耗无冷却？先设为0）
+        self.block_cooldown_duration = 1.0    # 冷却1秒（局内消耗冷却）
+        self.is_teammate = False              # 是否为AI队友
+        self.coins = 0                        # 队友独立金币（仅当is_teammate为True时使用）
+        self.coin_logs = []                   # 队友独立金币日志
+        self.player_number = 0                # 玩家编号（1~4），0表示未分配
+
+        # 迫击炮状态
+        self.mortar_preview = False
+        self.mortar_preview_pos = pygame.Vector2(0, 0)
+        self.mortar_projectiles = []          # 迫击炮弹列表
+        self.mortar_cooldown = 0              # 发射冷却（帧数）
+        self.mortar_cooldown_frames = 60      # 默认，会被等级覆盖
+        self.mortar_level = 0                 # 局内迫击炮等级（0=未购买）
+        self.mortar_ammo = 0                  # 当前弹药
+        self.mortar_max_ammo = 2              # 最大弹药（一级时）
+        self.mortar_reserve_ammo = 0          # 备用弹药
+        self.mortar_reload_time = 2.5         # 装弹时间（秒）
+        self.mortar_reloading = False
+        self.mortar_reload_timer = 0
+
+    def burst_heal(self):
+        if self.hp >= self.max_hp:
+            return False
+        self.hp = min(self.max_hp, self.hp + GameConfig.HEAL_AMOUNT)
+        return True
+
+    def take_damage(self, amount):
+        if amount <= 0:
+            return
+        if self.downed:
+            return   # 倒地后不再受伤害
+        old_hp = self.hp
+        self.hp = max(0, self.hp - amount)
+        if self.hp < old_hp and hit_sound:
+            hit_sound.play()
+        self.heal_delay_timer = GameConfig.HEAL_DELAY
+        self.heal_cooldown = 0.0
+        if self.hp <= 0:
+            self.enter_downed()
+    
+    def enter_downed(self):
+        if self.downed:
+            return
+        self.downed = True
+        self.hp = 0
+        self.downed_timer = self.downed_duration
+        # 清除所有预览状态
+        self.preview_mode = False
+        self.medkit_preview = False
+        self.dead = False  # 确保属性存在
+        # 不能移动和攻击（在update中处理）
+    
+    def revive(self):
+        self.downed = False
+        self.hp = self.max_hp // 2  # 复活后一半血
+        self.heal_delay_timer = 0.0
+        self.heal_cooldown = 0.0
+
+    def update(self, dt, keys, move_speed, sprint_speed):
+        # ====================================================
+        # 倒地状态处理
+        if self.downed:
+            self.downed_timer -= dt
+            # 倒地时只能缓慢移动，不能攻击
+            self.recoil_vel = pygame.Vector2(0, 0)
+            self.preview_mode = False
+            self.rocket_cooldown = max(0, self.rocket_cooldown - 1)  # 冷却依然减少但无法攻击
+            
+            # 计算移动输入（速度降低为原来的30%）
+            dx, dy = 0, 0
+            if keys[pygame.K_w]: dy -= 1
+            if keys[pygame.K_s]: dy += 1
+            if keys[pygame.K_a]: dx -= 1; self.flip = True
+            if keys[pygame.K_d]: dx += 1; self.flip = False
+            if abs(dx) + abs(dy) > 0.1:
+                length = math.hypot(dx, dy)
+                dx, dy = dx / length, dy / length
+            spd = move_speed * 0.3  # 倒地移动速度倍率
+            total_vel = pygame.Vector2(dx * spd, dy * spd)
+            
+            new_x = self.pos.x + total_vel.x * dt
+            new_y = self.pos.y + total_vel.y * dt
+            half_size = self.size / 2
+            self.pos.x = max(half_size, min(GameConfig.WORLD_WIDTH - half_size, new_x))
+            self.pos.y = max(half_size, min(GameConfig.WORLD_HEIGHT - half_size, new_y))
+            self.rect.center = (round(self.pos.x), round(self.pos.y))
+            return  # 跳过正常更新（不处理自然回血、后坐力等）
+        
+        if self.rocket_cooldown > 0:
+            self.rocket_cooldown -= 1
+            self.cool_progress = self.rocket_cooldown / GameConfig.ROCKET_COOLDOWN_FRAMES
+        else:
+            self.cool_progress = 0.0
+        if self.rocket_cooldown > 0:
+            self.rocket_cooldown -= 1
+            self.cool_progress = self.rocket_cooldown / GameConfig.ROCKET_COOLDOWN_FRAMES
+        else:
+            self.cool_progress = 0.0
+
+        # 医疗包冷却更新
+        if self.medkit_cooldown > 0:
+            self.medkit_cooldown -= dt
+            if self.medkit_cooldown < 0:
+                self.medkit_cooldown = 0.0
+
+        # 皮卡车冷却更新
+        if self.truck_cooldown > 0:
+            self.truck_cooldown -= dt
+            if self.truck_cooldown < 0:
+                self.truck_cooldown = 0.0
+
+        # 皮卡车变身状态更新
+        if self.truck_active:
+            self.truck_timer -= dt
+            if self.truck_timer <= 0 or self.truck_cancel_request:
+                self.truck_active = False
+                self.truck_timer = 0.0
+                self.truck_cooldown = 3.0   # 手动取消或时间到均进入3秒冷却
+                self.truck_cancel_request = False
+
+        # 阻挡箱冷却更新
+        if self.block_cooldown > 0:
+            self.block_cooldown -= dt
+            if self.block_cooldown < 0:
+                self.block_cooldown = 0.0
+
+        # 迫击炮冷却更新
+        if self.mortar_cooldown > 0:
+            self.mortar_cooldown -= 1
+
+        if self.hp < self.max_hp:
+            if self.heal_delay_timer > 0:
+                self.heal_delay_timer = max(0.0, self.heal_delay_timer - dt)
+            else:
+                self.heal_cooldown = max(0.0, self.heal_cooldown - dt)
+                if self.heal_cooldown <= 0:
+                    self.burst_heal()
+                    self.heal_cooldown = GameConfig.HEAL_INTERVAL
+        else:
+            self.heal_delay_timer = 0.0
+            self.heal_cooldown = 0.0
+
+        if self.recoil_timer > 0:
+            self.recoil_timer -= dt
+            self.recoil_vel *= math.exp(-5.0 * dt)
+        else:
+            self.recoil_vel = pygame.Vector2(0, 0)
+
+        if self.squat_timer > 0:
+            self.squat_timer -= 1
+            if self.squat_timer == 0:
+                self.squat_offset = 0
+            else:
+                self.squat_offset *= 0.85
+
+        total_vel = self.recoil_vel.copy()
+        dx, dy = 0, 0
+        if keys[pygame.K_w]: dy -= 1
+        if keys[pygame.K_s]: dy += 1
+        if keys[pygame.K_a]: dx -= 1; self.flip = True
+        if keys[pygame.K_d]: dx += 1; self.flip = False
+        if abs(dx) + abs(dy) > 0.1:
+            length = math.hypot(dx, dy)
+            dx, dy = dx / length, dy / length
+        spd = sprint_speed if keys[pygame.K_LSHIFT] else move_speed
+        # 皮卡车速度加成
+        if self.truck_active:
+            spd *= self.truck_speed_multiplier
+        total_vel.x += dx * spd
+        total_vel.y += dy * spd
+
+        new_x = self.pos.x + total_vel.x * dt
+        new_y = self.pos.y + total_vel.y * dt
+        half_size = self.size / 2
+        self.pos.x = max(half_size, min(GameConfig.WORLD_WIDTH - half_size, new_x))
+        self.pos.y = max(half_size, min(GameConfig.WORLD_HEIGHT - half_size, new_y))
+        self.rect.center = (round(self.pos.x), round(self.pos.y))
+        
+        # 更新医疗包预览位置（如果有）
+        if self.medkit_preview:
+            mx, my = pygame.mouse.get_pos()
+            # 注意：这里需要摄像机偏移量，但Player类不持有摄像机，所以预览位置的实际更新在run_game的事件循环中完成
+            pass
+
+        # 更新阻挡箱预览位置（如果有）
+        if self.block_preview:
+            mx, my = pygame.mouse.get_pos()
+            # 预览位置实际更新在 run_game 事件循环中完成
+            pass
+
+    def draw(self, screen, camera):
+        sp = camera.apply(self.pos)
+        x, y = round(sp.x), round(sp.y)
+        s = 1.2
+        si = lambda v: round(v * s)
+        
+        if self.downed:
+            # 倒地绘制：将站立人物整体旋转90度（侧倒），头部朝向由flip决定（flip=True时头朝左）
+            # 创建一个临时表面绘制站立人物
+            stand_width = si(50)
+            stand_height = si(70)
+            temp_surf = pygame.Surface((stand_width, stand_height), pygame.SRCALPHA)
+            # 计算绘制偏移，使人物中心在 (stand_width//2, stand_height-20) 位置（脚底接近底部）
+            cx = stand_width // 2
+            cy = stand_height - si(20)
+            
+            # 绘制身体
+            pygame.draw.rect(temp_surf, CLOTH, (cx - si(8), cy - si(20), si(16), si(25)))
+            pygame.draw.rect(temp_surf, BLACK, (cx - si(8), cy - si(20), si(16), si(25)), 2)
+            # 头部
+            pygame.draw.circle(temp_surf, SKIN, (cx, cy - si(30)), si(12))
+            pygame.draw.circle(temp_surf, BLACK, (cx, cy - si(30)), si(12), 2)
+            # 眼睛（根据flip绘制）
+            ex = si(5) if not self.flip else -si(5)
+            pygame.draw.circle(temp_surf, BLACK, (cx + ex, cy - si(31)), si(2))
+            # 手臂
+            pygame.draw.rect(temp_surf, SKIN, (cx - si(10), cy - si(20), si(6), si(18)))
+            pygame.draw.rect(temp_surf, BLACK, (cx - si(10), cy - si(20), si(6), si(18)), 2)
+            # 腿
+            pygame.draw.rect(temp_surf, DARK_BROWN, (cx - si(7), cy + si(5), si(6), si(12)))
+            pygame.draw.rect(temp_surf, DARK_BROWN, (cx + si(1), cy + si(5), si(6), si(12)))
+            pygame.draw.rect(temp_surf, BLACK, (cx - si(7), cy + si(5), si(6), si(12)), 2)
+            pygame.draw.rect(temp_surf, BLACK, (cx + si(1), cy + si(5), si(6), si(12)), 2)
+            
+            # 根据flip决定旋转方向：flip=True 头朝左（逆时针转90度），flip=False 头朝右（顺时针转90度）
+            angle = -90 if self.flip else 90
+            rotated_surf = pygame.transform.rotate(temp_surf, angle)
+            # 旋转后尺寸变化，计算绘制位置使人物底部对齐原位置
+            rot_rect = rotated_surf.get_rect()
+            # 原站立时脚底大约在 cy + si(17) 处，旋转后需调整偏移
+            # 简化：以屏幕坐标 (x, y) 为人物中心偏下位置绘制
+            screen.blit(rotated_surf, (x - rot_rect.width//2, y - rot_rect.height//2))
+        elif self.truck_active:
+            # 跑车模型绘制：更矮、更长，流线型
+            truck_width = si(84)      # 更长
+            truck_height = si(26)     # 更矮
+            # 车身主体（深蓝色，带一点弧度感）
+            body_rect = pygame.Rect(x - truck_width//2, y - truck_height//2, truck_width, truck_height)
+            pygame.draw.rect(screen, (30, 100, 200), body_rect, border_radius=si(6))
+            pygame.draw.rect(screen, (0, 0, 0), body_rect, 2, border_radius=si(6))
+            # 车身上部流线（跑车弧线，代替驾驶室凸起）
+            roof_height = si(8)
+            roof_rect = pygame.Rect(x - truck_width//2 + si(8), y - truck_height//2 - roof_height, truck_width - si(16), roof_height)
+            pygame.draw.rect(screen, (50, 130, 220), roof_rect, border_radius=si(4))
+            pygame.draw.rect(screen, (0, 0, 0), roof_rect, 2, border_radius=si(4))
+            # 车窗（紧贴顶部弧线）
+            window_width = si(40)
+            window_height = si(6)
+            if not self.flip:
+                window_x = x + truck_width//2 - window_width - si(8)
+            else:
+                window_x = x - truck_width//2 + si(8)
+            window_rect = pygame.Rect(window_x, y - truck_height//2 - roof_height + si(1), window_width, window_height)
+            pygame.draw.rect(screen, (180, 220, 255), window_rect, border_radius=si(2))
+            pygame.draw.rect(screen, (0, 0, 0), window_rect, 1, border_radius=si(2))
+            # 车轮（稍小，贴近跑车比例）
+            wheel_radius = si(7)
+            wheel_color = (20, 20, 20)
+            # 前轮
+            front_wheel_x = x + truck_width//2 - si(12) if not self.flip else x - truck_width//2 + si(12)
+            pygame.draw.circle(screen, wheel_color, (front_wheel_x, y + truck_height//2 - si(3)), wheel_radius)
+            pygame.draw.circle(screen, (120, 120, 120), (front_wheel_x, y + truck_height//2 - si(3)), wheel_radius, 2)
+            # 后轮
+            rear_wheel_x = x - truck_width//2 + si(12) if not self.flip else x + truck_width//2 - si(12)
+            pygame.draw.circle(screen, wheel_color, (rear_wheel_x, y + truck_height//2 - si(3)), wheel_radius)
+            pygame.draw.circle(screen, (120, 120, 120), (rear_wheel_x, y + truck_height//2 - si(3)), wheel_radius, 2)
+            # 绘制剩余时间进度条（提亮色）
+            if self.truck_timer > 0:
+                bar_width = truck_width
+                bar_height = si(5)
+                bar_x = x - bar_width//2
+                bar_y = y - truck_height//2 - si(14)
+                pygame.draw.rect(screen, (20, 20, 20), (bar_x, bar_y, bar_width, bar_height))
+                fill_width = int(bar_width * (self.truck_timer / self.truck_base_duration))
+                pygame.draw.rect(screen, (50, 255, 50), (bar_x, bar_y, fill_width, bar_height))
+                pygame.draw.rect(screen, (255, 255, 255), (bar_x, bar_y, bar_width, bar_height), 1)
+        else:
+            # 正常站立绘制（原代码不变）
+            pygame.draw.rect(screen, CLOTH, (x - si(8), y + si(5), si(16), si(25)))
+            pygame.draw.rect(screen, BLACK, (x - si(8), y + si(5), si(16), si(25)), 2)
+            pygame.draw.circle(screen, SKIN, (x, y - si(5)), si(12))
+            pygame.draw.circle(screen, BLACK, (x, y - si(5)), si(12), 2)
+            ex = si(5) if not self.flip else -si(5)
+            pygame.draw.circle(screen, BLACK, (x + ex, y - si(6)), si(2))
+            pygame.draw.rect(screen, SKIN, (x - si(10), y + si(5), si(6), si(18)))
+            pygame.draw.rect(screen, BLACK, (x - si(10), y + si(5), si(6), si(18)), 2)
+            pygame.draw.rect(screen, DARK_BROWN, (x - si(7), y + si(30), si(6), si(12)))
+            pygame.draw.rect(screen, DARK_BROWN, (x + si(1), y + si(30), si(6), si(12)))
+            pygame.draw.rect(screen, BLACK, (x - si(7), y + si(30), si(6), si(12)), 2)
+            pygame.draw.rect(screen, BLACK, (x + si(1), y + si(30), si(6), si(12)), 2)
+
+        # 绘制阻挡箱预览（如果开启）
+        if self.block_preview:
+            preview_size = 90
+            screen_pos = camera.apply(self.block_preview_pos)
+            px, py = int(screen_pos.x), int(screen_pos.y)
+            half = preview_size // 2
+            preview_rect = pygame.Rect(px - half, py - half, preview_size, preview_size)
+            # 绘制半透明红色方块（与实际阻挡箱颜色一致，无边框）
+            s_fill = pygame.Surface((preview_size, preview_size), pygame.SRCALPHA)
+            s_fill.fill((255, 0, 0, 150))
+            screen.blit(s_fill, (px - half, py - half))
+            # 绘制血条背景（半透明黑色）
+            bar_width = preview_size
+            bar_height = 6
+            bar_x = px - bar_width // 2
+            bar_y = py - half - 10
+            s_bar_bg = pygame.Surface((bar_width, bar_height), pygame.SRCALPHA)
+            s_bar_bg.fill((0, 0, 0, 150))
+            screen.blit(s_bar_bg, (bar_x, bar_y))
+            # 绘制血条填充（绿色，满血）
+            fill_width = int(bar_width * 1.0)
+            s_bar_fill = pygame.Surface((fill_width, bar_height), pygame.SRCALPHA)
+            s_bar_fill.fill((0, 255, 0, 180))
+            screen.blit(s_bar_fill, (bar_x, bar_y))
+            # 绘制血条边框（白色半透明）
+            pygame.draw.rect(screen, (255, 255, 255, 180), (bar_x, bar_y, bar_width, bar_height), 1)
+
+# ==================== 摄像机类 ====================
+class Camera:
+    def __init__(self, w, h):
+        self.offset = pygame.Vector2()
+        self.w, self.h = w, h
+
+    def follow(self, target):
+        self.offset.xy = target.x - self.w//2, target.y - self.h//2
+        self.offset.x = max(0, min(GameConfig.WORLD_WIDTH - self.w, self.offset.x))
+        self.offset.y = max(0, min(GameConfig.WORLD_HEIGHT - self.h, self.offset.y))
+
+    def apply(self, pos):
+        return pos - self.offset
+
+# ==================== AI敌人 ====================
+class AIEnemy:
+    def __init__(self, x, y):
+        self.pos = pygame.Vector2(x, y)
+        self.spawn_x = x
+        self.spawn_y = y
+        self.death_pos = None
+        self.size = GameConfig.PLAYER_SIZE
+        self.speed = GameConfig.PLAYER_SPEED * 0.9
+        self.max_hp = 200
+        self.hp = 200
+        self.rect = pygame.Rect(0, 0, self.size, self.size)
+        self.rect.center = (round(self.pos.x), round(self.pos.y))
+        self.flip = False
+        self.dead = False
+        self.downed = False
+        self.revive_timer = 0.0
+        self.revive_duration = 3.5
+        self.revivable = True   # 是否可复活，默认True
+
+        self.rockets = []
+        self.current_ammo = GameConfig.MAX_AMMO
+        self.reserve_ammo = 0
+        self.reloading = False
+        self.reload_timer = 0
+        self.reload_start_ammo = 0
+        self.cool_progress = 0.0
+        self.reload_progress = 0.0
+        self.recoil_vel = pygame.Vector2(0, 0)
+        self.recoil_timer = 0.0
+        self.squat_offset = 0
+        self.squat_timer = 0
+
+        self.state = "patrol"
+        self.patrol_target = None
+        self.patrol_wait_timer = 0.0
+        self.vision_range = 450
+        self.attack_range = 350
+        self.qte_locks = []
+        self.keys_unlocked = False
+        self.enemies_list = None   # 敌人列表引用
+        self.teammates_list = []   # 队友列表引用（4V1模式专用）
+        self.debug_vars = {}       # 调试变量引用
+
+
+        self.body_color = (180, 40, 40)
+        self.skin_color = (255, 200, 180)
+        self.dark_color = (80, 20, 20)
+        self.downed_color = (80, 80, 80)
+
+        self.attack_timer = 0
+        self.attack_cooldown_min = 0.6
+        self.attack_cooldown_max = 0.8
+        self.out_of_combat_timer = 0.0
+        self.heal_per_second = 50
+
+        # 新增：用于平滑追逐方向的属性
+        self.chase_target_dir = pygame.Vector2(0, 0)
+
+        # 新增：分离行为参数
+        self.separation_distance = 80.0      # 触发分离的距离阈值
+        self.separation_strength = 0.8       # 分离力强度（0-1之间）
+
+        # 新增属性：是否禁用距离优化（默认False，即使用优化）
+        self.disable_optimization = False
+        # 新增属性：难度字符串（用于困难/噩梦的召唤机制）
+        self.difficulty = "简单"
+
+    def set_locks_reference(self, locks):
+        self.qte_locks = locks
+
+    def take_damage(self, amount):
+        if self.downed or amount <= 0:
+            return
+        old_hp = self.hp
+        self.hp = max(0, self.hp - amount)
+        if self.hp < old_hp and hit_sound:
+            hit_sound.play()
+        self.out_of_combat_timer = 8.0
+        if self.hp <= 0:
+            self.enter_downed()
+
+    def enter_downed(self):
+        if self.downed:
+            return
+        self.downed = True
+        self.hp = 0
+        self.revive_timer = self.revive_duration
+        self.rockets.clear()
+        self.state = "patrol"
+        self.attack_timer = 0
+        self.reloading = False
+        self.recoil_vel = pygame.Vector2(0, 0)
+        self.recoil_timer = 0.0
+        self.squat_offset = 0
+        self.squat_timer = 0
+        self.death_pos = pygame.Vector2(self.pos.x, self.pos.y)
+        # 如果不可复活，直接标记为死亡
+        if not self.revivable:
+            self.dead = True
+            self.downed = False   # 确保不再被处理
+
+    def revive(self):
+        # 如果不可复活，则不执行复活逻辑
+        if not self.revivable:
+            self.dead = True
+            return
+        self.downed = False
+        self.hp = self.max_hp
+        self.revive_timer = 0.0
+        self.current_ammo = GameConfig.MAX_AMMO
+        self.attack_timer = 0
+        if self.death_pos is not None:
+            self.pos = pygame.Vector2(self.death_pos.x, self.death_pos.y)
+            self.death_pos = None
+        else:
+            self.pos = pygame.Vector2(self.spawn_x, self.spawn_y)
+        self.rect.center = (round(self.pos.x), round(self.pos.y))
+        self.recoil_vel = pygame.Vector2(0, 0)
+        self.recoil_timer = 0.0
+        self.squat_offset = 0
+        self.squat_timer = 0
+
+    def update(self, dt, player, walls, doors, chests):
+        if self.dead:
+            return
+        if self.downed:
+            self.revive_timer -= dt
+            if self.revive_timer <= 0:
+                self.revive()
+            return
+
+        # 性能优化：距离玩家过远且不在战斗状态时，只更新基本计时器（仅当不禁用优化时）
+        dist_to_player = self.pos.distance_to(player.pos)
+        if not self.disable_optimization and dist_to_player > 1200 and self.state == "patrol" and self.out_of_combat_timer <= 0:
+            # 仅更新生命恢复计时器（如果有）
+            if self.hp < self.max_hp:
+                self.hp = min(self.max_hp, self.hp + self.heal_per_second * dt)
+            return
+
+        if self.out_of_combat_timer > 0:
+            self.out_of_combat_timer -= dt
+        elif self.hp < self.max_hp:
+            self.hp = min(self.max_hp, self.hp + self.heal_per_second * dt)
+        if self.attack_timer > 0:
+            self.attack_timer -= dt
+            self.cool_progress = self.attack_timer / self.attack_cooldown_max
+        else:
+            self.cool_progress = 0.0
+
+        if self.reloading:
+            self.reload_timer -= 1
+            elapsed = GameConfig.RELOAD_TOTAL_FRAMES - self.reload_timer
+            recovered = elapsed // GameConfig.BASE_RELOAD_INTERVAL_FRAMES
+            self.current_ammo = min(GameConfig.MAX_AMMO, self.reload_start_ammo + recovered)
+            self.reload_progress = min(1.0, elapsed / GameConfig.RELOAD_TOTAL_FRAMES)
+            if self.reload_timer <= 0:
+                self.reloading = False
+                self.current_ammo = GameConfig.MAX_AMMO
+        else:
+            self.reload_progress = 0.0
+
+        if self.recoil_timer > 0:
+            self.recoil_timer -= dt
+            self.recoil_vel *= math.exp(-5.0 * dt)
+        else:
+            self.recoil_vel = pygame.Vector2(0, 0)
+
+        if self.squat_timer > 0:
+            self.squat_timer -= 1
+            if self.squat_timer == 0:
+                self.squat_offset = 0
+            else:
+                self.squat_offset *= 0.85
+
+        if self.qte_locks and not self.keys_unlocked:
+            if all(lock.is_unlocked for lock in self.qte_locks):
+                self.keys_unlocked = True
+
+        player_pos = player.pos
+        dist_to_player = self.pos.distance_to(player_pos)
+        # 如果玩家倒地 或 无敌模式开启，敌人不再将其视为目标
+        if player.downed or self.debug_vars.get('god_mode', False):
+            self.state = "patrol"
+            in_sight = False
+        else:
+            in_sight = dist_to_player < self.vision_range
+
+        # 获取敌人自伤开关状态
+        enemy_self_damage = getattr(self, 'debug_vars', {}).get('enemy_self_damage', False)
+
+        # 根据开关决定目标（包含队友），优先攻击最近的存活单位
+        potential_targets = []
+        if not player.downed:
+            potential_targets.append(player)
+        if self.teammates_list:
+            for mate in self.teammates_list:
+                if not mate.downed:
+                    potential_targets.append(mate)
+        # 如果没有有效目标，回退到玩家位置（但玩家已倒地时使用敌人自身位置避免错误）
+        if not potential_targets:
+            target_pos = player_pos
+            target_in_sight = False
+        else:
+            # 如果开启敌人自伤，也将其他敌人加入目标列表
+            if enemy_self_damage and self.enemies_list is not None:
+                for other in self.enemies_list:
+                    if other is self or other.dead or other.downed:
+                        continue
+                    potential_targets.append(other)
+            # 寻找最近的目标（敌人会主动攻击距离自己最近的单位）
+            nearest_target = None
+            min_dist_sq = float('inf')
+            for target in potential_targets:
+                dx = target.pos.x - self.pos.x
+                dy = target.pos.y - self.pos.y
+                dist_sq = dx*dx + dy*dy
+                if dist_sq < min_dist_sq:
+                    min_dist_sq = dist_sq
+                    nearest_target = target
+            if nearest_target is not None:
+                target_pos = nearest_target.pos
+                target_in_sight = min_dist_sq < self.vision_range * self.vision_range
+            else:
+                target_pos = player_pos
+                target_in_sight = in_sight
+
+
+        new_state = "chase" if (self.keys_unlocked or target_in_sight) else "patrol"
+        # 如果从非追逐变为追逐且存在敌人列表，通知所有其他敌人
+        # 此外，在困难/噩梦模式下，只要当前敌人处于追逐状态（不论之前状态），就强制通知其他敌人
+        should_notify = False
+        if new_state == "chase" and self.enemies_list is not None:
+            if self.state != "chase":
+                should_notify = True
+            elif self.difficulty in ("困难", "噩梦") and not self.debug_vars.get('god_mode', False) and not player.downed:
+                # 困难/噩梦模式下，若已经在追逐，也通知其他敌人（确保所有敌人同步发现玩家）
+                should_notify = True
+        if should_notify:
+            for other in self.enemies_list:
+                if other is not self and not other.dead and not other.downed:
+                    other.state = "chase"
+                    other.patrol_target = player.pos
+        self.state = new_state
+
+        # 计算原始移动方向（未平滑）
+        raw_move_dir = pygame.Vector2(0, 0)
+        if self.state == "patrol":
+            if self.patrol_target is None or self.pos.distance_to(self.patrol_target) < 50:
+                self.patrol_wait_timer -= dt
+                if self.patrol_wait_timer <= 0:
+                    if self.qte_locks and len(self.qte_locks) >= 4:
+                        weights = [0.4, 0.3, 0.15, 0.15]
+                        idx = random.choices([0, 1, 2, 3], weights=weights)[0]
+                        lock = self.qte_locks[idx]
+                        offset_x = random.randint(-80, 80)
+                        offset_y = random.randint(-80, 80)
+                        self.patrol_target = pygame.Vector2(lock.x + offset_x, lock.y + offset_y)
+                    else:
+                        self.patrol_target = pygame.Vector2(
+                            random.randint(100, GameConfig.WORLD_WIDTH - 100),
+                            random.randint(100, GameConfig.WORLD_HEIGHT - 100)
+                        )
+                    self.patrol_wait_timer = random.uniform(2.0, 5.0)
+            else:
+                dir_to_target = self.patrol_target - self.pos
+                if dir_to_target.length() > 0:
+                    raw_move_dir = dir_to_target.normalize()
+
+        elif self.state == "chase":
+            # 使用前面计算的目标位置
+            dir_to_target = target_pos - self.pos
+            dist_to_target = dir_to_target.length()
+            if dist_to_target > 0:
+                raw_move_dir = dir_to_target.normalize()
+                # 距离控制：防止贴脸，改为降低速度（不再反向移动，避免抽动）
+                preferred_distance = self.attack_range * 0.7  # 约245像素
+                if dist_to_target < preferred_distance:
+                    # 根据距离比例降低速度，最低降至 0.5 倍
+                    speed_ratio = max(0.5, dist_to_target / preferred_distance)
+                    raw_move_dir *= speed_ratio
+            # 检查是否有视线阻挡（简单射线检测）
+            line_of_sight = True
+            # 从自身位置到目标位置做线段检测
+            start = self.pos
+            end = target_pos
+            steps = max(1, int(start.distance_to(end) // 20))  # 每20像素检测一次
+            for i in range(steps + 1):
+                t = i / steps
+                check_x = start.x + (end.x - start.x) * t
+                check_y = start.y + (end.y - start.y) * t
+                check_rect = pygame.Rect(check_x - 2, check_y - 2, 4, 4)
+                # 检查墙壁
+                for wall in walls:
+                    if wall.rect.collidepoint(check_x, check_y):
+                        line_of_sight = False
+                        break
+                if not line_of_sight:
+                    break
+                # 检查关闭的门（只有关闭的门才阻挡视线）
+                for door in doors:
+                    if hasattr(door, 'is_open') and not door.is_open:
+                        if door.check_collision(check_rect)[0]:
+                            line_of_sight = False
+                            break
+                if not line_of_sight:
+                    break
+                # 检查箱子
+                for chest in chests:
+                    if not chest.opened and chest.rect.collidepoint(check_x, check_y):
+                        line_of_sight = False
+                        break
+                if not line_of_sight:
+                    break
+
+            
+            if dist_to_target < self.attack_range and self.attack_timer <= 0 and not self.reloading and line_of_sight:
+                if self.current_ammo > 0:
+                    # 防止目标重合导致零向量
+                    if dist_to_target > 0:
+                        shoot_dir = dir_to_target.normalize()
+                    else:
+                        # 默认向右侧开火
+                        shoot_dir = pygame.Vector2(1 if not self.flip else -1, 0)
+                    offset = shoot_dir * 25
+                    rocket = Rocket(
+                        self.pos.x + offset.x,
+                        self.pos.y + offset.y - 5,
+                        shoot_dir,
+                        GameConfig.ROCKET_SPEED_BASE,
+                        800,
+                        False,
+                        bullet_tracking=False,
+                        is_enemy=True
+                    )
+                    
+                    self.rockets.append(rocket)
+                    if rocket_launch_sound:
+                        rocket_launch_sound.play()
+                    self.attack_timer = random.uniform(self.attack_cooldown_min, self.attack_cooldown_max)
+                    self.current_ammo -= 1
+                    if self.current_ammo == 0:
+                        self.reloading = True
+                        self.reload_timer = GameConfig.RELOAD_TOTAL_FRAMES
+                        self.reload_start_ammo = 0
+                    recoil_speed = GameConfig.RECOIL_DISTANCE / GameConfig.RECOIL_DURATION
+                    self.recoil_vel = -shoot_dir * recoil_speed
+                    self.recoil_timer = GameConfig.RECOIL_DURATION
+                    self.squat_offset = 9
+                    self.squat_timer = 10
+
+        # 对移动方向进行平滑（低通滤波），减少突变
+        if self.state == "chase":
+            # 平滑因子 0.3，值越小越平滑
+            self.chase_target_dir = self.chase_target_dir.lerp(raw_move_dir, 0.3)
+            move_dir = self.chase_target_dir
+        else:
+            # 巡逻模式直接使用原始方向
+            move_dir = raw_move_dir
+            # 重置平滑方向，避免残留影响下次追逐
+            self.chase_target_dir = pygame.Vector2(0, 0)
+
+        # ========== 新增：敌人间分离行为（防止粘在一起） ==========
+        if self.enemies_list is not None and len(self.enemies_list) > 1:
+            separation_vec = pygame.Vector2(0, 0)
+            neighbor_count = 0
+            for other in self.enemies_list:
+                if other is self or other.dead or other.downed:
+                    continue
+                diff = self.pos - other.pos
+                dist = diff.length()
+                if dist < self.separation_distance and dist > 0.01:
+                    # 距离越近，推力越大（指数或线性衰减）
+                    strength = (self.separation_distance - dist) / self.separation_distance
+                    separation_vec += diff.normalize() * strength
+                    neighbor_count += 1
+            if neighbor_count > 0:
+                separation_vec /= neighbor_count
+                if separation_vec.length() > 0:
+                    separation_vec = separation_vec.normalize()
+                    # 将分离方向以一定强度混合到当前移动方向
+                    move_dir = (move_dir + separation_vec * self.separation_strength).normalize()
+        # ========== 分离行为结束 ==========
+
+        # 期望移动向量（应用调试速度倍数）
+        speed_mult = self.debug_vars.get('enemy_speed_scale', 1.0) if hasattr(self, 'debug_vars') else 1.0
+        desired_vel = move_dir * self.speed * speed_mult * dt + self.recoil_vel * dt
+        vel = desired_vel.copy()
+        
+        # 迭代处理碰撞，并沿墙滑动
+        for _ in range(GameConfig.COLLISION_ITERATIONS):
+            # 尝试移动
+            new_pos = self.pos + vel
+            half = self.size / 2
+            new_pos.x = max(half, min(GameConfig.WORLD_WIDTH - half, new_pos.x))
+            new_pos.y = max(half, min(GameConfig.WORLD_HEIGHT - half, new_pos.y))
+            self.pos = new_pos
+            self.rect.center = (round(self.pos.x), round(self.pos.y))
+            
+            collided = False
+            for wall in walls:
+                collides, overlap, axis = wall.check_collision(self.rect)
+                if collides:
+                    # 位置修正
+                    self.pos.x += axis[0] * overlap
+                    self.pos.y += axis[1] * overlap
+                    self.rect.center = (round(self.pos.x), round(self.pos.y))
+                    collided = True
+                    # 滑动：抵消垂直于墙的速度分量
+                    dot = vel.x * axis[0] + vel.y * axis[1]
+                    if dot < 0:  # 只有朝着墙运动时才抵消
+                        vel.x -= dot * axis[0]
+                        vel.y -= dot * axis[1]
+            for door in doors:
+                if hasattr(door, 'check_collision'):
+                    collides, overlap, axis = door.check_collision(self.rect)
+                    if collides:
+                        # 尝试开门（但红色逃生门不能由AI打开）
+                        if hasattr(door, 'is_open') and not door.is_open:
+                            # 排除红色铁门 (RedHorizontalDoor)
+                            if not isinstance(door, RedHorizontalDoor):
+                                if hasattr(door, 'toggle'):
+                                    door.toggle()
+                                elif hasattr(door, 'target_angle') and door.target_angle == 0:
+                                    door.is_open = True
+                                    door.target_angle = -90 if not getattr(door, 'is_horizontal', False) else 90
+                        # 位置修正与滑动
+                        self.pos.x += axis[0] * overlap
+                        self.pos.y += axis[1] * overlap
+                        self.rect.center = (round(self.pos.x), round(self.pos.y))
+                        collided = True
+                        dot = vel.x * axis[0] + vel.y * axis[1]
+                        if dot < 0:
+                            vel.x -= dot * axis[0]
+                            vel.y -= dot * axis[1]
+            for chest in chests:
+                if not chest.opened:
+                    collides, overlap, axis = chest.check_collision(self.rect)
+                    if collides:
+                        self.pos.x += axis[0] * overlap
+                        self.pos.y += axis[1] * overlap
+                        self.rect.center = (round(self.pos.x), round(self.pos.y))
+                        collided = True
+                        dot = vel.x * axis[0] + vel.y * axis[1]
+                        if dot < 0:
+                            vel.x -= dot * axis[0]
+                            vel.y -= dot * axis[1]
+            if not collided:
+                break
+        
+        # 确保在世界边界内
+        half = self.size / 2
+        self.pos.x = max(half, min(GameConfig.WORLD_WIDTH - half, self.pos.x))
+        self.pos.y = max(half, min(GameConfig.WORLD_HEIGHT - half, self.pos.y))
+        self.rect.center = (round(self.pos.x), round(self.pos.y))
+
+        for rocket in self.rockets[:]:
+            rocket.update()
+            if not rocket.active:
+                self.rockets.remove(rocket)
+
+        if move_dir.x < -0.1:
+            self.flip = True
+        elif move_dir.x > 0.1:
+            self.flip = False
+
+    def draw(self, screen, camera):
+        if self.dead:
+            return
+        sp = camera.apply(self.pos)
+        x, y = round(sp.x), round(sp.y)
+        s = 1.2
+        si = lambda v: round(v * s)
+
+        if self.downed:
+            body_color = self.downed_color
+            skin_color = (160, 160, 160)
+            dark_color = (60, 60, 60)
+        else:
+            body_color = self.body_color
+            skin_color = self.skin_color
+            dark_color = self.dark_color
+
+        pygame.draw.rect(screen, body_color, (x - si(8), y + si(5), si(16), si(25)))
+        pygame.draw.rect(screen, (0, 0, 0), (x - si(8), y + si(5), si(16), si(25)), 2)
+        pygame.draw.circle(screen, skin_color, (x, y - si(5)), si(12))
+        pygame.draw.circle(screen, (0, 0, 0), (x, y - si(5)), si(12), 2)
+        ex = si(5) if not self.flip else -si(5)
+        pygame.draw.circle(screen, (0, 0, 0), (x + ex, y - si(6)), si(2))
+        pygame.draw.rect(screen, skin_color, (x - si(10), y + si(5), si(6), si(18)))
+        pygame.draw.rect(screen, (0, 0, 0), (x - si(10), y + si(5), si(6), si(18)), 2)
+        pygame.draw.rect(screen, dark_color, (x - si(7), y + si(30), si(6), si(12)))
+        pygame.draw.rect(screen, dark_color, (x + si(1), y + si(30), si(6), si(12)))
+        pygame.draw.rect(screen, (0, 0, 0), (x - si(7), y + si(30), si(6), si(12)), 2)
+        pygame.draw.rect(screen, (0, 0, 0), (x + si(1), y + si(30), si(6), si(12)), 2)
+
+        for rocket in self.rockets:
+            rocket.draw(screen, camera)
+
+        self.draw_health_bar(screen, camera)
+        if not self.downed:
+            self.draw_ammo_and_cooldown(screen, camera)
+
+        if self.downed:
+            font = get_font(20)
+            timer_text = f"{self.revive_timer:.1f}s"
+            text_surf = font.render(timer_text, True, (255, 255, 255))
+            text_rect = text_surf.get_rect(center=(x, y - 50))
+            outline_surf = font.render(timer_text, True, (0, 0, 0))
+            for dx, dy in [(-1,0), (1,0), (0,-1), (0,1)]:
+                screen.blit(outline_surf, text_rect.move(dx, dy))
+            screen.blit(text_surf, text_rect)
+
+    def draw_health_bar(self, screen, camera):
+        screen_pos = camera.apply(self.pos)
+        bar_height = 9
+        total_blocks = 8
+        bar_width = 100
+        head_y = screen_pos.y - self.size / 2 + 2
+        bar_x = int(screen_pos.x - bar_width // 2)
+        bar_y = int(head_y - bar_height)
+        outer_rect = pygame.Rect(bar_x, bar_y, bar_width, bar_height)
+        pygame.draw.rect(screen, (0, 0, 0), outer_rect, 1)
+        inner_rect = outer_rect.inflate(-2, -2)
+        inner_x, inner_y = inner_rect.x, inner_rect.y
+        inner_w, inner_h = inner_rect.width, inner_rect.height
+        pygame.draw.rect(screen, (0, 0, 0), inner_rect)
+        block_width = inner_w / total_blocks
+        hp_ratio = self.hp / self.max_hp
+        total_fill = int(hp_ratio * inner_w)
+        fill_color = (200, 50, 50) if not self.downed else (100, 100, 100)
+        for i in range(total_blocks):
+            left = inner_x + int(i * block_width)
+            right = inner_x + int((i+1) * block_width)
+            fill_end = min(right, inner_x + total_fill)
+            if fill_end > left:
+                pygame.draw.rect(screen, fill_color, (left, inner_y, fill_end - left, inner_h))
+        for i in range(1, total_blocks):
+            line_x = inner_x + int(i * block_width)
+            pygame.draw.line(screen, (0, 0, 0), (line_x, inner_y), (line_x, inner_y + inner_h), 1)
+
+    def draw_ammo_and_cooldown(self, screen, camera):
+        screen_pos = camera.apply(self.pos)
+        bullet_width = 8
+        bullet_height = 16
+        spacing = 4
+        total_width = bullet_width * GameConfig.MAX_AMMO + spacing * (GameConfig.MAX_AMMO - 1)
+        start_x = screen_pos.x - total_width // 2
+        head_y = screen_pos.y - self.size / 2 - 0
+        bar_height_hp = 9
+        bar_y_hp = head_y - bar_height_hp
+        ammo_y = bar_y_hp - bullet_height - 10
+
+        half_width = bullet_width // 2
+        for i in range(GameConfig.MAX_AMMO):
+            x = start_x + i * (bullet_width + spacing)
+            y = ammo_y
+            fill_color = (200, 150, 50) if i < self.current_ammo else (80, 80, 80)
+            border_color = (128, 128, 128)
+            rect_rect = pygame.Rect(x, y + half_width, bullet_width, bullet_height - half_width)
+            pygame.draw.rect(screen, fill_color, rect_rect)
+            old_clip = screen.get_clip()
+            clip_rect = pygame.Rect(x, y, bullet_width, half_width)
+            screen.set_clip(clip_rect)
+            pygame.draw.circle(screen, fill_color, (x + half_width, y + half_width), half_width)
+            screen.set_clip(old_clip)
+            pygame.draw.line(screen, border_color, (x, y + half_width), (x, y + bullet_height - 1), 1)
+            pygame.draw.line(screen, border_color, (x + bullet_width - 1, y + half_width), (x + bullet_width - 1, y + bullet_height - 1), 1)
+            pygame.draw.line(screen, border_color, (x, y + bullet_height - 1), (x + bullet_width - 1, y + bullet_height - 1), 1)
+            old_clip2 = screen.get_clip()
+            screen.set_clip(clip_rect)
+            pygame.draw.circle(screen, border_color, (x + half_width, y + half_width), half_width, 1)
+            screen.set_clip(old_clip2)
+
+        bar_width = 45
+        bar_height = 8
+        cool_y = ammo_y + bullet_height + 1.5
+        bar_x = screen_pos.x - bar_width // 2
+        bar_rect = pygame.Rect(bar_x, cool_y, bar_width, bar_height)
+        pygame.draw.rect(screen, (255, 255, 255), bar_rect)
+        pygame.draw.rect(screen, (100, 100, 100), bar_rect, 1)
+        progress = self.reload_progress if self.reloading else self.cool_progress
+        if progress > 0:
+            fill_width = int(bar_width * progress)
+            if fill_width > 0:
+                fill_x = bar_x if self.reloading else bar_x + (bar_width - fill_width)
+                fill_rect = pygame.Rect(fill_x, cool_y, fill_width, bar_height)
+                pygame.draw.rect(screen, (0, 0, 0), fill_rect)
+
+    def check_collision_with_player(self, player_rect):
+        return self.rect.colliderect(player_rect)
+
+# ==================== 设置菜单 ====================
+class SettingsMenu:
+    def __init__(self):
+        self.visible = False
+        self.aim_assist = False
+        self.continuous_attack = False
+        self.unlimited_throw_range = False   # 远距投掷
+        self.no_item_cooldown = False        # 道具冷却
+        self.infinite_throw = False          # 无限投掷
+        self.gear_rect = pygame.Rect(0, 0, 30, 30)
+        self.popup_rect = pygame.Rect(0, 0, 300, 340)  # 增加高度容纳新开关
+        self.exit_rect = pygame.Rect(0, 0, 120, 40)
+        self.switch1_rect = pygame.Rect(0, 0, 40, 20)
+        self.switch2_rect = pygame.Rect(0, 0, 40, 20)
+        self.switch3_rect = pygame.Rect(0, 0, 40, 20)
+        self.switch4_rect = pygame.Rect(0, 0, 40, 20)
+        self.switch5_rect = pygame.Rect(0, 0, 40, 20)
+
+    def toggle_visibility(self):
+        self.visible = not self.visible
+
+    def handle_click(self, mouse_pos):
+        if not self.visible:
+            if self.gear_rect.collidepoint(mouse_pos):
+                self.visible = True
+                return True
+            return False
+        else:
+            if not self.popup_rect.collidepoint(mouse_pos):
+                self.visible = False
+                return True
+            if self.switch1_rect.collidepoint(mouse_pos):
+                self.aim_assist = not self.aim_assist
+                return True
+            if self.switch2_rect.collidepoint(mouse_pos):
+                self.continuous_attack = not self.continuous_attack
+                return True
+            if self.switch3_rect.collidepoint(mouse_pos):
+                self.unlimited_throw_range = not self.unlimited_throw_range
+                return True
+            if self.switch4_rect.collidepoint(mouse_pos):
+                self.no_item_cooldown = not self.no_item_cooldown
+                return True
+            if self.switch5_rect.collidepoint(mouse_pos):
+                self.infinite_throw = not self.infinite_throw
+                return True
+            if self.exit_rect.collidepoint(mouse_pos):
+                return "exit"
+            return False
+
+    def update_rects(self, screen_width, screen_height):
+        minimap_right = screen_width - 10
+        minimap_left = minimap_right - GameConfig.MINIMAP_WIDTH
+        gear_x = minimap_left - 35
+        gear_y = 10
+        self.gear_rect.topleft = (gear_x, gear_y)
+
+        popup_w, popup_h = self.popup_rect.size
+        self.popup_rect.center = (screen_width//2, screen_height//2)
+
+        base_x = self.popup_rect.x + 60
+        base_y = self.popup_rect.y + 70
+        self.switch1_rect.topleft = (base_x, base_y)
+        self.switch2_rect.topleft = (base_x, base_y + 40)
+        self.switch3_rect.topleft = (base_x, base_y + 80)
+        self.switch4_rect.topleft = (base_x, base_y + 120)
+        self.switch5_rect.topleft = (base_x, base_y + 160)
+
+        self.exit_rect.midbottom = (self.popup_rect.centerx, self.popup_rect.bottom - 20)
+
+    def draw(self, screen):
+        pygame.draw.rect(screen, (100, 100, 100), self.gear_rect, border_radius=5)
+        pygame.draw.rect(screen, (200, 200, 200), self.gear_rect, 2, border_radius=5)
+        cx, cy = self.gear_rect.center
+        pygame.draw.circle(screen, (200, 200, 200), (cx, cy), 8, 2)
+        pygame.draw.circle(screen, (200, 200, 200), (cx, cy), 4)
+        for i in range(8):
+            angle = i * math.pi / 4
+            dx = math.cos(angle) * 10
+            dy = math.sin(angle) * 10
+            pygame.draw.line(screen, (200, 200, 200),
+                             (cx + dx*0.7, cy + dy*0.7),
+                             (cx + dx*1.3, cy + dy*1.3), 2)
+
+        if not self.visible:
+            return
+
+        mask = pygame.Surface(screen.get_size(), pygame.SRCALPHA)
+        mask.fill((0, 0, 0, 128))
+        screen.blit(mask, (0, 0))
+
+        pygame.draw.rect(screen, (40, 40, 40), self.popup_rect, border_radius=12)
+        pygame.draw.rect(screen, (100, 100, 100), self.popup_rect, 3, border_radius=12)
+
+        font_title = get_font(28, bold=True)
+        title_surf = font_title.render("设置", True, WHITE)
+        screen.blit(title_surf, (self.popup_rect.x + 20, self.popup_rect.y + 15))
+
+        font_label = get_font(20)
+        label1 = font_label.render("辅助瞄准", True, WHITE)
+        screen.blit(label1, (self.switch1_rect.right + 15, self.switch1_rect.y))
+        self._draw_switch(screen, self.switch1_rect, self.aim_assist)
+
+        label2 = font_label.render("攻击连续", True, WHITE)
+        screen.blit(label2, (self.switch2_rect.right + 15, self.switch2_rect.y))
+        self._draw_switch(screen, self.switch2_rect, self.continuous_attack)
+
+        pygame.draw.rect(screen, (180, 50, 50), self.exit_rect, border_radius=8)
+        pygame.draw.rect(screen, WHITE, self.exit_rect, 2, border_radius=8)
+        exit_text = font_label.render("退出游戏", True, WHITE)
+        text_rect = exit_text.get_rect(center=self.exit_rect.center)
+        screen.blit(exit_text, text_rect)
+
+    def _draw_switch(self, screen, rect, state):
+        bg_color = (0, 150, 0) if state else (150, 0, 0)
+        pygame.draw.rect(screen, bg_color, rect, border_radius=10)
+        pygame.draw.rect(screen, WHITE, rect, 2, border_radius=10)
+        knob_x = rect.right - 10 if state else rect.left + 10
+        pygame.draw.circle(screen, WHITE, (knob_x, rect.centery), 8)
+
+# ==================== UI绘制函数（世界绘制、小地图、血条等） ====================
+def draw_world_tiles(screen, camera):
+    ox, oy = int(camera.offset.x), int(camera.offset.y)
+    sw, sh = screen.get_size()
+    world_rect = pygame.Rect(-ox, -oy, GameConfig.WORLD_WIDTH, GameConfig.WORLD_HEIGHT)
+    pygame.draw.rect(screen, WHITE, world_rect)
+    tile_size = GameConfig.TILE_SIZE
+    start_x, start_y = (-ox) % tile_size, (-oy) % tile_size
+    for x in range(start_x, sw, tile_size):
+        pygame.draw.line(screen, TILE_LINE, (x, 0), (x, sh), 1)
+    for y in range(start_y, sh, tile_size):
+        pygame.draw.line(screen, TILE_LINE, (0, y), (sw, y), 1)
+
+def draw_health_bar_above_player(screen, player, camera):
+    screen_pos = camera.apply(player.pos)
+    bar_height = 9
+    # 显示用最大血量（不低于100，保证至少显示4格）
+    display_max_hp = max(player.max_hp, 100)
+    # 根据最大血量动态计算最大宽度，高血量时增加宽度以避免挤在一起
+    max_bar_width = 50 if display_max_hp <= 100 else 100 if display_max_hp <= 300 else 200
+    # 硬性限制最多12格，超出则调整每格容量
+    MAX_BLOCKS = 12
+    total_blocks = (display_max_hp + 24) // 25  # 先按25血一格计算理论格数
+    if total_blocks > MAX_BLOCKS:
+        total_blocks = MAX_BLOCKS
+        block_hp = display_max_hp / MAX_BLOCKS
+    else:
+        block_hp = 25
+        total_blocks = max(1, total_blocks)  # 至少1格
+    if total_blocks == 0:
+        return
+    bar_width = min(max_bar_width, total_blocks * 10)
+    head_y = screen_pos.y - player.size / 2 + 2
+    bar_x = int(screen_pos.x - bar_width // 2)
+    bar_y = int(head_y - bar_height)
+    
+    # 在血条左侧绘制小圆编号
+    if player.player_number > 0:
+        circle_radius = 8
+        circle_center_x = bar_x - circle_radius - 3
+        circle_center_y = bar_y + bar_height // 2
+        # 圆背景色：玩家青绿，队友蓝色
+        if player.is_teammate:
+            circle_color = (100, 180, 255)   # 队友蓝色
+        else:
+            circle_color = (80, 220, 200)     # 玩家青绿色
+        pygame.draw.circle(screen, circle_color, (circle_center_x, circle_center_y), circle_radius)
+        pygame.draw.circle(screen, (200, 200, 200), (circle_center_x, circle_center_y), circle_radius, 1)
+        # 绘制白色数字
+        font_num = get_font(11, bold=True)
+        num_text = str(player.player_number)
+        num_surf = font_num.render(num_text, True, (255, 255, 255))
+        num_rect = num_surf.get_rect(center=(circle_center_x, circle_center_y))
+        # 黑色描边
+        shadow = font_num.render(num_text, True, (0, 0, 0))
+        screen.blit(shadow, num_rect.move(1, 1))
+        screen.blit(num_surf, num_rect)
+    
+    outer_rect = pygame.Rect(bar_x, bar_y, bar_width, bar_height)
+    pygame.draw.rect(screen, BLACK, outer_rect, 1)
+    inner_rect = outer_rect.inflate(-2, -2)
+    inner_x, inner_y = inner_rect.x, inner_rect.y
+    inner_w, inner_h = inner_rect.width, inner_rect.height
+    pygame.draw.rect(screen, BLACK, inner_rect)
+    block_width_float = inner_w / total_blocks
+    block_lefts = [inner_x + int(i * block_width_float) for i in range(total_blocks + 2)]
+    block_lefts[-1] = inner_x + inner_w
+    # 根据实际血量与显示上限的比例计算填充宽度
+    hp_ratio = player.hp / display_max_hp
+    total_fill_width = int(hp_ratio * inner_w)
+    for i in range(total_blocks):
+        left = block_lefts[i]
+        right = block_lefts[i+1]
+        fill_end = min(right, inner_x + total_fill_width)
+        if fill_end > left:
+            pygame.draw.rect(screen, GREEN, (left, inner_y, fill_end - left, inner_h))
+    for i in range(1, total_blocks):
+        line_x = block_lefts[i]
+        pygame.draw.line(screen, BLACK, (line_x, inner_y), (line_x, inner_y + inner_h), 1)
+
+def draw_ammo_indicators_above_player(screen, player, camera, weapon_type=None, mortar_ammo=0, mortar_max_ammo=0):
+    # 根据武器类型决定弹药显示
+    if weapon_type == 'mortar':
+        max_ammo = mortar_max_ammo
+        current_ammo = mortar_ammo
+        bullet_width = 10  # 稍大一点区分
+        bullet_height = 18
+    else:
+        max_ammo = GameConfig.MAX_AMMO
+        current_ammo = player.current_ammo
+        bullet_width = 8
+        bullet_height = 16
+    screen_pos = camera.apply(player.pos)
+    spacing = 4
+    total_width = bullet_width * max_ammo + spacing * (max_ammo - 1)
+    start_x = screen_pos.x - total_width // 2
+    head_y = screen_pos.y - player.size / 2 - 0
+    bar_height = 9
+    bar_y = head_y - bar_height
+    ammo_y = bar_y - bullet_height - 10
+    half_width = bullet_width // 2
+    for i in range(max_ammo):
+        x = start_x + i * (bullet_width + spacing)
+        y = ammo_y
+        fill_color = (200, 150, 50) if i < current_ammo else (80, 80, 80)
+        border_color = (128, 128, 128)
+        rect_rect = pygame.Rect(x, y + half_width, bullet_width, bullet_height - half_width)
+        pygame.draw.rect(screen, fill_color, rect_rect)
+        old_clip = screen.get_clip()
+        clip_rect = pygame.Rect(x, y, bullet_width, half_width)
+        screen.set_clip(clip_rect)
+        pygame.draw.circle(screen, fill_color, (x + half_width, y + half_width), half_width)
+        screen.set_clip(old_clip)
+        rect_left = x
+        rect_right = x + bullet_width - 1
+        rect_top = y + half_width
+        rect_bottom = y + bullet_height - 1
+        pygame.draw.line(screen, border_color, (rect_left, rect_top), (rect_left, rect_bottom), 1)
+        pygame.draw.line(screen, border_color, (rect_right, rect_top), (rect_right, rect_bottom), 1)
+        pygame.draw.line(screen, border_color, (rect_left, rect_bottom), (rect_right, rect_bottom), 1)
+        old_clip2 = screen.get_clip()
+        screen.set_clip(clip_rect)
+        pygame.draw.circle(screen, border_color, (x + half_width, y + half_width), half_width, 1)
+        screen.set_clip(old_clip2)
+
+def draw_cooling_bar(screen, player, camera, weapon_type=None, mortar_cooldown=0, mortar_cooldown_frames=60, mortar_reloading=False, mortar_reload_progress=0.0):
+    screen_pos = camera.apply(player.pos)
+    bar_width = 45
+    bar_height = 8
+    border_color = (100, 100, 100)
+    bg_color = WHITE
+    fill_color = BLACK
+    head_y = screen_pos.y - player.size / 2 - 0
+    bar_height_hp = 9
+    bar_y_hp = head_y - bar_height_hp
+    if weapon_type == 'mortar':
+        bullet_height = 18
+    else:
+        bullet_height = 16
+    ammo_y = bar_y_hp - bullet_height - 10
+    cool_y = ammo_y + bullet_height + 1.5
+    bar_x = screen_pos.x - bar_width // 2
+    bar_rect = pygame.Rect(bar_x, cool_y, bar_width, bar_height)
+    pygame.draw.rect(screen, bg_color, bar_rect)
+    pygame.draw.rect(screen, border_color, bar_rect, 1)
+    if weapon_type == 'mortar':
+        progress = mortar_reload_progress if mortar_reloading else (mortar_cooldown / mortar_cooldown_frames if mortar_cooldown_frames > 0 else 0)
+        reloading = mortar_reloading
+    else:
+        progress = player.reload_progress if player.reloading else player.cool_progress
+        reloading = player.reloading
+    if progress > 0:
+        fill_width = int(bar_width * progress)
+        if fill_width > 0:
+            fill_x = bar_x if reloading else bar_x + (bar_width - fill_width)
+            fill_rect = pygame.Rect(fill_x, cool_y, fill_width, bar_height)
+            pygame.draw.rect(screen, fill_color, fill_rect)
+
+def draw_game_timer(screen, elapsed_seconds):
+    minutes = int(elapsed_seconds // 60)
+    seconds = int(elapsed_seconds % 60)
+    time_str = f"{minutes:02d}:{seconds:02d}"
+    font = get_font(15)
+    text_surf = font.render(time_str, True, (255, 255, 255)).convert_alpha()
+    text_surf.set_alpha(220)
+    outline_surf = font.render(time_str, True, (0, 0, 0)).convert_alpha()
+    outline_surf.set_alpha(100)
+    text_rect = text_surf.get_rect(center=(GameConfig.WINDOW_WIDTH // 2, 10))
+    for dx, dy in [(-1,0), (1,0), (0,-1), (0,1)]:
+        screen.blit(outline_surf, text_rect.move(dx, dy))
+    screen.blit(text_surf, text_rect)
+
+def draw_inventory_bar(screen, equipped_items, coins, medkit_level, block_level, truck_level, rocket_level, mortar_level, player_ammo, max_ammo, player_reserve, player):
+    item_names = {'rocket': '火箭筒', 'medkit': '医疗包', 'truck': '皮卡车', 'block': '阻挡箱', 'mortar': '迫击炮'}
+    item_colors = {'rocket': (200, 100, 0), 'medkit': (200, 50, 50), 'truck': (100, 100, 200), 'block': (150, 150, 150), 'mortar': (128, 0, 128)}
+
+    def get_truck_cost(level):
+        return 180
+
+    slot_size = 60
+    slot_spacing = 20
+    max_slots = 4
+    total_width = slot_size * max_slots + slot_spacing * (max_slots - 1)
+    start_x = (GameConfig.WINDOW_WIDTH - total_width) // 2
+    y = GameConfig.WINDOW_HEIGHT - 120
+    font = get_font(16)
+    price_font = get_font(14)
+
+    for i in range(max_slots):
+        x = start_x + i * (slot_size + slot_spacing)
+
+        if i < len(equipped_items):
+            item_id = equipped_items[i]
+            name = item_names.get(item_id, item_id)
+            color = item_colors.get(item_id, (100, 100, 100))
+            has_item = True
+
+            if item_id == 'medkit':
+                cost = [200, 196, 192, 188, 184, 180, 176, 172, 168, 164, 160, 156, 152][medkit_level - 1]
+            elif item_id == 'rocket':
+                cost = 250 if rocket_level == 0 else 350 if rocket_level == 1 else 0
+            elif item_id == 'block':
+                cost = 50  # 固定价格50金币
+            elif item_id == 'truck':
+                cost = get_truck_cost(truck_level)
+            elif item_id == 'mortar':
+                # 迫击炮购买/升级消耗（与局内实际一致，基于玩家实际等级）
+                if player.mortar_level == 0:
+                    cost = 300  # 购买价格
+                elif player.mortar_level == 1:
+                    cost = 350  # 升至二级价格
+                elif player.mortar_level == 2:
+                    cost = 600  # 升至三级价格
+                else:
+                    cost = 0
+            else:
+                cost = 0
+        else:
+            name = "空"
+            color = (100, 100, 100)
+            has_item = False
+            cost = 0
+
+        slot_rect = pygame.Rect(x, y, slot_size, slot_size)
+        bg_color = (50, 50, 50, 60) if has_item else (30, 30, 30, 50)
+        slot_surf = pygame.Surface((slot_size, slot_size), pygame.SRCALPHA)
+        slot_surf.fill(bg_color)
+        screen.blit(slot_surf, (x, y))
+        pygame.draw.rect(screen, (180, 180, 180), slot_rect, 2)
+
+        if has_item:
+            icon_center = (x + slot_size // 2, y + slot_size // 2 - 5)
+            if item_id == 'medkit':
+                pygame.draw.rect(screen, (255, 255, 255), (icon_center[0] - 12, icon_center[1] - 4, 24, 8))
+                pygame.draw.rect(screen, (255, 255, 255), (icon_center[0] - 4, icon_center[1] - 12, 8, 24))
+                pygame.draw.rect(screen, (200, 0, 0), (icon_center[0] - 10, icon_center[1] - 2, 20, 4))
+                pygame.draw.rect(screen, (200, 0, 0), (icon_center[0] - 2, icon_center[1] - 10, 4, 20))
+            elif item_id == 'rocket':
+                pygame.draw.rect(screen, (139, 69, 19), (icon_center[0] - 15, icon_center[1] - 8, 30, 16))
+                pygame.draw.circle(screen, (100, 100, 100), (icon_center[0] + 15, icon_center[1]), 6)
+            elif item_id == 'truck':
+                pygame.draw.rect(screen, (70, 130, 200), (icon_center[0] - 18, icon_center[1] - 10, 36, 20))
+                pygame.draw.circle(screen, (0, 0, 0), (icon_center[0] - 10, icon_center[1] + 10), 5)
+                pygame.draw.circle(screen, (0, 0, 0), (icon_center[0] + 10, icon_center[1] + 10), 5)
+            elif item_id == 'block':
+                pygame.draw.rect(screen, (150, 150, 150), (icon_center[0] - 15, icon_center[1] - 15, 30, 30))
+                pygame.draw.rect(screen, (80, 80, 80), (icon_center[0] - 15, icon_center[1] - 15, 30, 30), 3)
+            elif item_id == 'mortar':
+                # 迫击炮图标：深紫色炮筒
+                pygame.draw.rect(screen, (128, 0, 128), (icon_center[0] - 18, icon_center[1] - 12, 36, 24))
+                pygame.draw.rect(screen, (80, 0, 80), (icon_center[0] - 18, icon_center[1] - 12, 36, 24), 2)
+                pygame.draw.circle(screen, (50, 50, 50), (icon_center[0] + 15, icon_center[1]), 8)
+                pygame.draw.circle(screen, (200, 200, 200), (icon_center[0] + 15, icon_center[1]), 8, 2)
+
+            text_surf = font.render(name, True, (255, 255, 255))
+            text_rect = text_surf.get_rect(center=(x + slot_size // 2, y + slot_size + 15))
+            shadow_surf = font.render(name, True, (0, 0, 0))
+            screen.blit(shadow_surf, text_rect.move(1, 1))
+            screen.blit(text_surf, text_rect)
+
+            if cost > 0:
+                price_text = f"${cost}"
+                price_color = (255, 215, 0) if coins >= cost else (255, 50, 50)
+            else:
+                if item_id == 'rocket' and rocket_level >= 2:
+                    price_text = "满级"
+                elif item_id == 'mortar' and player.mortar_level >= 3:
+                    price_text = "满级"
+                else:
+                    price_text = ""
+                price_color = (150, 150, 150) if price_text else (255, 255, 255)
+            
+            if price_text:
+                price_surf = price_font.render(price_text, True, price_color)
+                price_rect = price_surf.get_rect(center=(x + slot_size // 2, y + slot_size + 35))
+                shadow_surf2 = price_font.render(price_text, True, (0, 0, 0))
+                screen.blit(shadow_surf2, price_rect.move(1, 1))
+                screen.blit(price_surf, price_rect)
+        else:
+            text_surf = font.render("空", True, (150, 150, 150))
+            text_rect = text_surf.get_rect(center=(x + slot_size // 2, y + slot_size + 15))
+            screen.blit(text_surf, text_rect)
+
+    ammo_slot_x = start_x + max_slots * (slot_size + slot_spacing) + 1 * (slot_size + slot_spacing)
+    ammo_slot_y = y
+    ammo_cost = 120
+
+    ammo_rect = pygame.Rect(ammo_slot_x, ammo_slot_y, slot_size, slot_size)
+    ammo_bg = pygame.Surface((slot_size, slot_size), pygame.SRCALPHA)
+    ammo_bg.fill((50, 50, 50, 60))
+    screen.blit(ammo_bg, (ammo_slot_x, ammo_slot_y))
+    pygame.draw.rect(screen, (180, 180, 180), ammo_rect, 2)
+
+    icon_cx = ammo_slot_x + slot_size // 2
+    icon_cy = ammo_slot_y + slot_size // 2 - 5
+    pygame.draw.rect(screen, (200, 180, 100), (icon_cx - 10, icon_cy - 12, 20, 16))
+    pygame.draw.rect(screen, (150, 130, 50), (icon_cx - 10, icon_cy - 12, 20, 16), 2)
+    pygame.draw.rect(screen, (180, 150, 80), (icon_cx - 6, icon_cy - 16, 12, 6))
+    pygame.draw.rect(screen, (120, 100, 50), (icon_cx - 6, icon_cy - 16, 12, 6), 1)
+    pygame.draw.rect(screen, (160, 130, 70), (icon_cx - 12, icon_cy + 4, 24, 4))
+    pygame.draw.rect(screen, (120, 100, 50), (icon_cx - 12, icon_cy + 4, 24, 4), 1)
+
+    name_surf = font.render("弹夹", True, (255, 255, 255))
+    name_rect = name_surf.get_rect(center=(ammo_slot_x + slot_size // 2, ammo_slot_y + slot_size + 15))
+    shadow_surf = font.render("弹夹", True, (0, 0, 0))
+    screen.blit(shadow_surf, name_rect.move(1, 1))
+    screen.blit(name_surf, name_rect)
+
+    price_color = (255, 215, 0) if coins >= ammo_cost else (255, 50, 50)
+    price_surf = price_font.render(f"${ammo_cost}", True, price_color)
+    price_rect = price_surf.get_rect(center=(ammo_slot_x + slot_size // 2, ammo_slot_y + slot_size + 35))
+    shadow2 = price_font.render(f"${ammo_cost}", True, (0, 0, 0))
+    screen.blit(shadow2, price_rect.move(1, 1))
+    screen.blit(price_surf, price_rect)
+
+    f_font = get_font(12, bold=True)
+    f_surf = f_font.render("F", True, (255, 255, 255))
+    f_rect = f_surf.get_rect(bottomright=(ammo_slot_x + slot_size - 2, ammo_slot_y + slot_size - 2))
+    pygame.draw.circle(screen, (50, 50, 50), f_rect.center, 9)
+    pygame.draw.circle(screen, (200, 200, 200), f_rect.center, 9, 1)
+    screen.blit(f_surf, f_rect)
+
+    # 根据当前武器获取备弹数量
+    weapon_reserve = player_reserve
+    if 'mortar' in equipped_items and player.mortar_level > 0:
+        weapon_reserve = player.mortar_reserve_ammo
+    current_ammo_text = f"{player_ammo}/{max_ammo}"
+    reserve_text = f"备弹: {weapon_reserve}"
+    ammo_color = (255, 255, 255) if player_ammo > 0 else (150, 150, 150)
+    ammo_surf = price_font.render(current_ammo_text, True, ammo_color)
+    ammo_text_rect = ammo_surf.get_rect(center=(ammo_slot_x + slot_size // 2, ammo_slot_y - 25))
+    shadow3 = price_font.render(current_ammo_text, True, (0, 0, 0))
+    screen.blit(shadow3, ammo_text_rect.move(1, 1))
+    screen.blit(ammo_surf, ammo_text_rect)
+    
+    reserve_surf = price_font.render(reserve_text, True, (200, 200, 200))
+    reserve_rect = reserve_surf.get_rect(center=(ammo_slot_x + slot_size // 2, ammo_slot_y - 10))
+    shadow4 = price_font.render(reserve_text, True, (0, 0, 0))
+    screen.blit(shadow4, reserve_rect.move(1, 1))
+    screen.blit(reserve_surf, reserve_rect)
+
+
+
+def draw_coins_display(screen, coins, coin_logs):
+    font = get_font(24)
+    text = f"$ {coins}"
+    text_surf = font.render(text, True, (255, 215, 0))
+    text_rect = text_surf.get_rect(center=(GameConfig.WINDOW_WIDTH // 2, GameConfig.WINDOW_HEIGHT - 150))
+    outline_surf = font.render(text, True, (0, 0, 0))
+    for dx, dy in [(-1,0), (1,0), (0,-1), (0,1)]:
+        screen.blit(outline_surf, text_rect.move(dx, dy))
+    screen.blit(text_surf, text_rect)
+    
+    # 日志字体与金币相同大小
+    log_font = get_font(24)
+    source_font = get_font(14)
+    base_x = text_rect.right + 10
+    base_y = text_rect.centery - 5
+    
+    active_logs = [log for log in coin_logs if log[2] > 0]
+    active_logs = active_logs[-5:]
+    
+    for i, (amount, source, timer) in enumerate(reversed(active_logs)):
+        # 透明度渐隐
+        alpha = int(255 * (timer / 2.0))
+        alpha = max(0, min(255, alpha))
+        if alpha <= 0:
+            continue
+            
+        # 鲜艳的基础颜色（不进行任何亮度衰减）
+        if amount >= 0:
+            amount_color = (255, 215, 0)   # 纯金色
+            amount_text = f"+{amount}"
+        else:
+            amount_color = (255, 70, 70)   # 亮红色
+            amount_text = f"{amount}"
+        
+        amount_surf = log_font.render(amount_text, True, amount_color)
+        amount_surf.set_alpha(alpha)       # 只通过透明度渐隐，颜色本身保持明亮
+        
+        y_offset = base_y - i * 28
+        screen.blit(amount_surf, (base_x, y_offset))
+        
+        if source:
+            source_color = (200, 200, 200)
+            source_surf = source_font.render(source, True, source_color)
+            source_surf.set_alpha(alpha)
+            source_x = base_x + amount_surf.get_width() + 5
+            source_y = y_offset + (amount_surf.get_height() - source_surf.get_height()) // 2
+            screen.blit(source_surf, (source_x, source_y))
+
+def draw_minimap(screen, player, camera, walls, doors, vents, smoke_disable, qte_locks=None, chests=None, enemies=None, teammates=None):
+    minimap_surf = pygame.Surface((GameConfig.MINIMAP_WIDTH, GameConfig.MINIMAP_HEIGHT), pygame.SRCALPHA)
+    scale_x = GameConfig.MINIMAP_WIDTH / GameConfig.WORLD_WIDTH
+    scale_y = GameConfig.MINIMAP_HEIGHT / GameConfig.WORLD_HEIGHT
+    for x in range(0, GameConfig.WORLD_WIDTH, GameConfig.TILE_SIZE):
+        px = x * scale_x
+        if 0 <= px <= GameConfig.MINIMAP_WIDTH:
+            pygame.draw.line(minimap_surf, (220, 220, 220, 80), (px, 0), (px, GameConfig.MINIMAP_HEIGHT), 1)
+    for y in range(0, GameConfig.WORLD_HEIGHT, GameConfig.TILE_SIZE):
+        py = y * scale_y
+        if 0 <= py <= GameConfig.MINIMAP_HEIGHT:
+            pygame.draw.line(minimap_surf, (220, 220, 220, 80), (0, py), (GameConfig.MINIMAP_WIDTH, py), 1)
+    for wall in walls:
+        rx = wall.rect.x * scale_x
+        ry = wall.rect.y * scale_y
+        rw = max(1, wall.rect.width * scale_x)
+        rh = max(1, wall.rect.height * scale_y)
+        pygame.draw.rect(minimap_surf, (100, 100, 100, 150), (rx, ry, rw, rh))
+    for door in doors:
+        if hasattr(door, 'gap_rect'):
+            rx = door.gap_rect.x * scale_x
+            ry = door.gap_rect.y * scale_y
+            rw = max(1, door.gap_rect.width * scale_x)
+            rh = max(1, door.gap_rect.height * scale_y)
+            pygame.draw.rect(minimap_surf, (139, 69, 19, 150), (rx, ry, rw, rh))
+    for vent in vents:
+        cx = vent.x * scale_x
+        cy = vent.y * scale_y
+        r = max(2, vent.size // 2 * scale_x)
+        pygame.draw.circle(minimap_surf, (160, 160, 160, 150), (int(cx), int(cy)), int(r))
+    if qte_locks:
+        if not isinstance(qte_locks, list):
+            locks_to_draw = [qte_locks]
+        else:
+            locks_to_draw = qte_locks
+        for qte_lock in locks_to_draw:
+            rx = qte_lock.rect.x * scale_x
+            ry = qte_lock.rect.y * scale_y
+            rw = max(1, qte_lock.rect.width * scale_x)
+            rh = max(1, qte_lock.rect.height * scale_y)
+            color = (180, 180, 180, 150) if qte_lock.is_unlocked else (220, 180, 0, 200)
+            pygame.draw.rect(minimap_surf, color, (rx, ry, rw, rh))
+    if chests:
+        for chest in chests:
+            if not chest.opened:
+                rx = chest.rect.x * scale_x
+                ry = chest.rect.y * scale_y
+                rw = max(1, chest.size * scale_x)
+                rh = max(1, chest.size * scale_y)
+                pygame.draw.rect(minimap_surf, (139, 90, 43, 200), (rx, ry, rw, rh))
+    if enemies:
+        for enemy in enemies:
+            if not enemy.dead:
+                ex = enemy.pos.x * scale_x
+                ey = enemy.pos.y * scale_y
+                pygame.draw.circle(minimap_surf, (255, 0, 0, 200), (int(ex), int(ey)), 3)
+    # 绘制队友（4V1模式）
+    if teammates:
+        for mate in teammates:
+            if not mate.downed:
+                mx = mate.pos.x * scale_x
+                my = mate.pos.y * scale_y
+                pygame.draw.circle(minimap_surf, (0, 100, 255, 200), (int(mx), int(my)), 3)                
+    px = player.pos.x * scale_x
+    py = player.pos.y * scale_y
+    player_radius = max(3, player.size * scale_x)
+    pygame.draw.circle(minimap_surf, (0, 255, 200, 255), (int(px), int(py)), int(player_radius))
+    pygame.draw.circle(minimap_surf, (255, 255, 255, 200), (int(px), int(py)), int(player_radius)+1, 1)
+    arrow_len = player_radius + 2
+    end_x = px + arrow_len if not player.flip else px - arrow_len
+    pygame.draw.line(minimap_surf, (255, 255, 255, 200), (px, py), (end_x, py), 2)
+    if not smoke_disable:
+        view_radius_world = GameConfig.WINDOW_WIDTH / 3
+        inner_radius = int(view_radius_world * scale_x)
+        fade_width = 12
+        outer_radius = inner_radius + fade_width
+        dark_alpha = 180
+        mask = pygame.Surface((GameConfig.MINIMAP_WIDTH, GameConfig.MINIMAP_HEIGHT), pygame.SRCALPHA)
+        # 收集所有存活单位的屏幕坐标（玩家+队友）
+        unit_positions = [(px, py)]
+        if teammates:
+            for mate in teammates:
+                if not mate.downed:
+                    unit_positions.append((mate.pos.x * scale_x, mate.pos.y * scale_y))
+        for y in range(GameConfig.MINIMAP_HEIGHT):
+            for x in range(GameConfig.MINIMAP_WIDTH):
+                # 计算到最近单位的距离
+                min_dist_sq = float('inf')
+                for ux, uy in unit_positions:
+                    dx = x - ux
+                    dy = y - uy
+                    dist_sq = dx*dx + dy*dy
+                    if dist_sq < min_dist_sq:
+                        min_dist_sq = dist_sq
+                dist = math.sqrt(min_dist_sq)
+                if dist <= inner_radius:
+                    alpha = 0
+                elif dist >= outer_radius:
+                    alpha = dark_alpha
+                else:
+                    t = (dist - inner_radius) / fade_width
+                    alpha = int(dark_alpha * t)
+                if alpha > 0:
+                    mask.set_at((x, y), (0, 0, 0, alpha))
+        minimap_surf.blit(mask, (0, 0))
+    pygame.draw.rect(minimap_surf, (200, 200, 200, 100), minimap_surf.get_rect(), 1)
+    screen.blit(minimap_surf, (GameConfig.WINDOW_WIDTH - GameConfig.MINIMAP_WIDTH - 10, 10))
+
+# ==================== 调试面板相关常量与函数 ====================
+DEBUG_PANEL_WIDTH = 280
+DEBUG_PANEL_HEIGHT = 400
+DEBUG_PANEL_X = 10
+DEBUG_PANEL_Y = 10
+DEBUG_ROW_HEIGHT = 26
+DEBUG_LABEL_WIDTH = 80
+DEBUG_BUTTON_WIDTH = 30
+DEBUG_BUTTON_HEIGHT = 22
+
+def draw_rounded_rect(surf, rect, color, radius=8):
+    pygame.draw.rect(surf, color, rect, border_radius=radius)
+
+def draw_numeric_control(surf, x, y, label, value, min_val, max_val, is_int=True, extra_display=None, max_reached=False):
+    font = get_font(12)
+    label_surf = font.render(f"{label}:", True, WHITE)
+    surf.blit(label_surf, (x, y + 3))
+    btn_width = DEBUG_BUTTON_WIDTH
+    btn_height = DEBUG_BUTTON_HEIGHT
+    btn_x = x + DEBUG_LABEL_WIDTH
+    minus_rect = pygame.Rect(btn_x, y, btn_width, btn_height)
+    pygame.draw.rect(surf, (100, 100, 100), minus_rect, border_radius=4)
+    minus_text = font.render("-", True, BLACK)
+    surf.blit(minus_text, (btn_x + btn_width//2 - minus_text.get_width()//2, y + btn_height//2 - minus_text.get_height()//2))
+    val_str = f"{int(value)}" if is_int else f"{value:.1f}"
+    val_surf = font.render(val_str, True, WHITE)
+    val_x = btn_x + btn_width + 5
+    surf.blit(val_surf, (val_x, y + btn_height//2 - val_surf.get_height()//2))
+    if extra_display:
+        extra_surf = font.render(extra_display, True, (200, 200, 200))
+        surf.blit(extra_surf, (val_x + 45, y + btn_height//2 - extra_surf.get_height()//2))
+    plus_rect = pygame.Rect(val_x + 45 + (40 if extra_display else 0), y, btn_width, btn_height)
+    if max_reached:
+        pygame.draw.rect(surf, (80, 80, 80), plus_rect, border_radius=4)
+        plus_text = font.render("+", True, (150, 150, 150))
+    else:
+        pygame.draw.rect(surf, (100, 100, 100), plus_rect, border_radius=4)
+        plus_text = font.render("+", True, BLACK)
+    surf.blit(plus_text, (plus_rect.x + btn_width//2 - plus_text.get_width()//2, y + btn_height//2 - plus_text.get_height()//2))
+    return minus_rect, plus_rect, pygame.Rect(val_x, y, 40, btn_height)
+
+def draw_switch(surf, x, y, state, label):
+    width = 36
+    height = 18
+    bg_rect = pygame.Rect(x, y, width, height)
+    pygame.draw.rect(surf, (100, 100, 100), bg_rect, border_radius=9)
+    if state:
+        circle_x = x + width - height//2
+        color = (0, 200, 0)
+    else:
+        circle_x = x + height//2
+        color = (200, 0, 0)
+    pygame.draw.circle(surf, color, (circle_x, y+height//2), height//2 - 2)
+    font = get_font(12)
+    text = font.render(label, True, WHITE)
+    surf.blit(text, (x + width + 5, y))
+    return pygame.Rect(x, y, width+5+text.get_width(), height)
+
+def draw_debug_panel(surf, player, debug_vars, scroll_y, enemies=None, current_enemy_index=0):
+    # 如果没有传入敌人列表或列表为空，current_enemy_index 设为 -1 表示无目标
+    if enemies is None or len(enemies) == 0:
+        current_enemy_index = -1
+    else:
+        # 确保索引有效
+        if current_enemy_index >= len(enemies):
+            current_enemy_index = 0
+        elif current_enemy_index < 0:
+            current_enemy_index = len(enemies) - 1
+
+    panel_rect = pygame.Rect(DEBUG_PANEL_X, DEBUG_PANEL_Y, DEBUG_PANEL_WIDTH, DEBUG_PANEL_HEIGHT)
+    draw_rounded_rect(surf, panel_rect, (0, 0, 0, 180), 8)
+    clip_rect = panel_rect.inflate(-10, -10)
+    clip_rect.topleft = (DEBUG_PANEL_X+5, DEBUG_PANEL_Y+5)
+    surf.set_clip(clip_rect)
+    y_offset = DEBUG_PANEL_Y + 10 - scroll_y
+    x_start = DEBUG_PANEL_X + 10
+    controls = []
+    y_offset += 10
+    font = get_font(14)
+    title = font.render("玩家", True, (255, 255, 0))
+    surf.blit(title, (x_start, y_offset))
+    y_offset += 20
+    font_small = get_font(12)
+    hp_text = font_small.render(f"当前生命: {int(player.hp)}", True, WHITE)
+    surf.blit(hp_text, (x_start, y_offset))
+    y_offset += DEBUG_ROW_HEIGHT
+    
+    # 血量设置输入框
+    set_hp_label = font_small.render("设置血量:", True, WHITE)
+    surf.blit(set_hp_label, (x_start, y_offset))
+    
+    # 输入框背景
+    input_rect = pygame.Rect(x_start + 60, y_offset, 80, DEBUG_BUTTON_HEIGHT)
+    pygame.draw.rect(surf, (60, 60, 60), input_rect, border_radius=4)
+    pygame.draw.rect(surf, WHITE, input_rect, 1, border_radius=4)
+    
+    # 显示当前输入的数字或提示
+    if 'hp_input_active' in debug_vars and debug_vars['hp_input_active']:
+        display_text = debug_vars.get('hp_input_value', '')
+        if not display_text:
+            display_text = ""
+    else:
+        display_text = "点击输入"
+    input_surf = font_small.render(display_text, True, WHITE)
+    surf.blit(input_surf, (input_rect.x + 5, input_rect.y + 3))
+    
+    # 保存输入框矩形以便点击检测
+    controls.append(("input", input_rect, "hp_input"))
+    
+    # 确认按钮
+    confirm_rect = pygame.Rect(x_start + 150, y_offset, 40, DEBUG_BUTTON_HEIGHT)
+    pygame.draw.rect(surf, (0, 150, 0), confirm_rect, border_radius=4)
+    confirm_text = font_small.render("设置", True, WHITE)
+    surf.blit(confirm_text, (confirm_rect.x + 5, confirm_rect.y + 3))
+    controls.append(("button", confirm_rect, "hp_confirm"))
+    
+    y_offset += DEBUG_ROW_HEIGHT
+    items = [
+        ("移动速度", debug_vars['move_speed'], 1, 20, False, 'move_speed'),
+        ("奔跑速度", debug_vars['sprint_speed'], 0.5, 10, False, 'sprint_speed'),
+        ("远程伤害", debug_vars['ranged_damage'], 1, float('inf'), False, 'ranged_damage'),
+        ("飞行速度", debug_vars.get('attack_speed_scale', 1), 1, 20, True, 'attack_speed_scale'),
+        ("菠萝降临", debug_vars['bullet_count'], 1, 500, True, 'bullet_count'),
+        ("投掷范围", debug_vars['throw_range_multiplier'], 1, 10, True, 'throw_range_multiplier'),
+    ]
+    for label, val, vmin, vmax, is_int, key in items:
+        max_reached = (key == 'rocket_speed_scale' and val >= 20) or \
+                      (key == 'bullet_count' and val >= 500)
+        minus, plus, _ = draw_numeric_control(surf, x_start, y_offset, label, val, vmin, vmax, is_int, max_reached=max_reached)
+        controls.append(("button", minus, f"{key}_dec"))
+        controls.append(("button", plus, f"{key}_inc"))
+        y_offset += DEBUG_ROW_HEIGHT
+    y_offset += 5
+
+    # ========== 对手区域 ==========
+    # 过滤出存活的敌人
+    alive_enemies = [e for e in enemies] if enemies is not None else []
+    if enemies is not None:
+        alive_enemies = [e for e in enemies if not e.dead]
+    else:
+        alive_enemies = []
+    total_alive = len(alive_enemies)
+
+    if total_alive > 0:
+        # 确保 current_enemy_index 有效（指向存活列表中的某个索引）
+        if current_enemy_index >= total_alive:
+            current_enemy_index = 0
+        enemy = alive_enemies[current_enemy_index]
+
+        # 区域标题
+        title_enemy = font.render("对手", True, (255, 100, 100))
+        surf.blit(title_enemy, (x_start, y_offset))
+        y_offset += 20
+
+        # 目标切换按钮（基于存活总数）
+        enemy_select_label = font_small.render(f"目标 [{current_enemy_index+1}/{total_alive}]", True, WHITE)
+        surf.blit(enemy_select_label, (x_start, y_offset))
+        btn_prev = pygame.Rect(x_start + 100, y_offset - 2, 20, 20)
+        btn_next = pygame.Rect(x_start + 125, y_offset - 2, 20, 20)
+        pygame.draw.rect(surf, (80,80,80), btn_prev, border_radius=4)
+        pygame.draw.rect(surf, (80,80,80), btn_next, border_radius=4)
+        surf.blit(font_small.render("<", True, WHITE), (btn_prev.x+6, btn_prev.y))
+        surf.blit(font_small.render(">", True, WHITE), (btn_next.x+6, btn_next.y))
+        controls.append(("button", btn_prev, "enemy_prev"))
+        controls.append(("button", btn_next, "enemy_next"))
+        y_offset += DEBUG_ROW_HEIGHT
+
+        # 当前生命
+        hp_text = font_small.render(f"生命: {int(enemy.hp)} / {int(enemy.max_hp)}", True, WHITE)
+        surf.blit(hp_text, (x_start, y_offset))
+        y_offset += DEBUG_ROW_HEIGHT
+
+        # 设置血量输入框
+        set_hp_label = font_small.render("设置血量:", True, WHITE)
+        surf.blit(set_hp_label, (x_start, y_offset))
+        input_rect_enemy = pygame.Rect(x_start + 60, y_offset, 80, DEBUG_BUTTON_HEIGHT)
+        pygame.draw.rect(surf, (60, 60, 60), input_rect_enemy, border_radius=4)
+        pygame.draw.rect(surf, WHITE, input_rect_enemy, 1, border_radius=4)
+        if debug_vars.get('enemy_hp_input_active', False):
+            display_text = debug_vars.get('enemy_hp_input_value', '')
+        else:
+            display_text = "点击输入"
+        input_surf_enemy = font_small.render(display_text, True, WHITE)
+        surf.blit(input_surf_enemy, (input_rect_enemy.x + 5, input_rect_enemy.y + 3))
+        controls.append(("input", input_rect_enemy, "enemy_hp_input"))
+        confirm_rect_enemy = pygame.Rect(x_start + 150, y_offset, 40, DEBUG_BUTTON_HEIGHT)
+        pygame.draw.rect(surf, (0, 150, 0), confirm_rect_enemy, border_radius=4)
+        surf.blit(font_small.render("设置", True, WHITE), (confirm_rect_enemy.x+5, confirm_rect_enemy.y+3))
+        controls.append(("button", confirm_rect_enemy, "enemy_hp_confirm"))
+        y_offset += DEBUG_ROW_HEIGHT
+
+        # 移动速度滑块
+        if 'enemy_speed_scale' not in debug_vars:
+            debug_vars['enemy_speed_scale'] = 1.0
+        speed_scale = debug_vars['enemy_speed_scale']
+        minus_speed, plus_speed, _ = draw_numeric_control(surf, x_start, y_offset, "移动速度", speed_scale, 0.1, 5.0, False)
+        controls.append(("button", minus_speed, "enemy_speed_dec"))
+        controls.append(("button", plus_speed, "enemy_speed_inc"))
+        y_offset += DEBUG_ROW_HEIGHT
+
+        # 攻击伤害倍数
+        if 'enemy_damage_scale' not in debug_vars:
+            debug_vars['enemy_damage_scale'] = 1.0
+        dmg_scale = debug_vars['enemy_damage_scale']
+        minus_dmg, plus_dmg, _ = draw_numeric_control(surf, x_start, y_offset, "攻击伤害", dmg_scale, 0.1, 10.0, False)
+        controls.append(("button", minus_dmg, "enemy_damage_dec"))
+        controls.append(("button", plus_dmg, "enemy_damage_inc"))
+        y_offset += DEBUG_ROW_HEIGHT
+
+    # ========== 功能开关 ==========
+    title = font.render("功能开关", True, (255, 255, 0))
+    surf.blit(title, (x_start, y_offset))
+    y_offset += 20
+    switches = [
+        ("无敌模式", 'god_mode'),
+        ("一击秒杀", 'one_hit_kill'),
+        ("无限弹药", 'infinite_ammo'),
+        ("远程无CD", 'ranged_no_cd'),
+        ("无后坐力", 'no_recoil'),
+        ("穿墙模式", 'noclip_mode'),
+        ("去除黑暗", 'smoke_disable'),
+        ("无限射程", 'infinite_range'),
+        ("子弹穿墙", 'bullet_through_walls'),
+        ("秒开", 'fast_interact'),
+        ("子弹跟踪", 'bullet_tracking'),
+        ("获取金币", 'get_coins'),
+        ("敌人自伤", 'enemy_self_damage'),
+        ("远距投掷", 'unlimited_throw_range'),
+        ("道具冷却", 'no_item_cooldown'),
+        ("无限投掷", 'infinite_throw'),
+        ("倒地道具", 'downed_use_items'),
+    ]
+    for label, key in switches:
+        rect = draw_switch(surf, x_start, y_offset, debug_vars[key], label)
+        controls.append(("switch", rect, key))
+        y_offset += DEBUG_ROW_HEIGHT
+    total_height = y_offset - (DEBUG_PANEL_Y + 10) + scroll_y
+    max_scroll = max(0, total_height - (DEBUG_PANEL_HEIGHT - 20))
+    surf.set_clip(None)
+    return controls, max_scroll, current_enemy_index
+
+# ==================== 世界构建函数 ====================
+def build_world():
+    walls = []
+    doors = []
+    vents = []
+    WALL_THICKNESS = 30
+    WALL_LENGTH = 320
+    GAP_BETWEEN = 500
+    total_height = WALL_THICKNESS * 2 + GAP_BETWEEN
+    start_y = (GameConfig.WORLD_HEIGHT - total_height) // 2
+    y1 = start_y
+    y2 = start_y + WALL_THICKNESS + GAP_BETWEEN
+    right_x = GameConfig.WORLD_WIDTH - WALL_LENGTH
+    walls.append(Wall(right_x, y1, WALL_LENGTH, WALL_THICKNESS, name="最右侧横墙（上）"))
+    walls.append(Wall(right_x, y2, WALL_LENGTH, WALL_THICKNESS, name="最右侧横墙（下）"))
+    VERTICAL_WALL_WIDTH = 30
+    HORIZONTAL_GAP = 80
+    EXTEND_TOP = 30
+    EXTEND_BOTTOM = 30
+    vertical_wall_x = right_x - HORIZONTAL_GAP - VERTICAL_WALL_WIDTH
+    vertical_wall_y = y1 + WALL_THICKNESS - EXTEND_TOP
+    vertical_wall_height = GAP_BETWEEN + EXTEND_TOP + EXTEND_BOTTOM
+    walls.append(Wall(vertical_wall_x, vertical_wall_y, VERTICAL_WALL_WIDTH, vertical_wall_height, name="右侧竖向连接墙（水平间距80）"))
+    X_OFFSET = +110
+    Y_OFFSET_TOP = -29
+    Y_OFFSET_BOTTOM = +29
+    base_door_x = vertical_wall_x - 80
+    base_door_y_top = y1 + WALL_THICKNESS
+    base_door_y_bottom = y1 + WALL_THICKNESS + GAP_BETWEEN - 10
+    door_x = base_door_x + X_OFFSET
+    door_y_top = base_door_y_top + Y_OFFSET_TOP
+    door_y_bottom = base_door_y_bottom + Y_OFFSET_BOTTOM
+    door_top_red = RedHorizontalDoor(door_x, door_y_top, open_direction=1, reading_time=8.4, name="上方红色门（向右开）")
+    doors.append(door_top_red)
+    door_bottom_red = RedHorizontalDoor(door_x, door_y_bottom, open_direction=-1, reading_time=8.4, name="下方红色门（向左开）")
+    doors.append(door_bottom_red)
+
+    WALL_WIDTH = 350
+    WALL_HEIGHT = 30
+    GAP = 40
+    total_height = WALL_HEIGHT * 2 + GAP
+    start_y = (GameConfig.WORLD_HEIGHT - total_height) // 2
+    upper_offset = -130
+    lower_offset = +130
+    y_top = start_y + upper_offset
+    y_bottom = start_y + WALL_HEIGHT + GAP + lower_offset
+    walls.append(Wall(0, y_top, WALL_WIDTH, WALL_HEIGHT, name="左侧横向墙1"))
+    walls.append(Wall(0, y_bottom, WALL_WIDTH, WALL_HEIGHT, name="左侧横向墙2"))
+    vertical_gap_height = y_bottom - (y_top + WALL_HEIGHT)
+    vertical_wall_thickness = WALL_HEIGHT
+    walls.append(Wall(0, y_top + WALL_HEIGHT, vertical_wall_thickness, vertical_gap_height, name="左侧竖向连接墙（内侧）"))
+    half_height = vertical_gap_height // 2
+    TOP_SHORTEN = 40
+    BOTTOM_SHORTEN = 40
+    upper_height = half_height - TOP_SHORTEN
+    lower_height = (vertical_gap_height - half_height) - BOTTOM_SHORTEN
+    walls.append(Wall(WALL_WIDTH - 30, y_top + WALL_HEIGHT, vertical_wall_thickness, upper_height, name="右侧竖向连接墙上半段"))
+    lower_start_y = y_top + WALL_HEIGHT + half_height + BOTTOM_SHORTEN
+    walls.append(Wall(WALL_WIDTH - 30, lower_start_y, vertical_wall_thickness, lower_height, name="右侧竖向连接墙下半段"))
+    gap_center_y = y_top + WALL_HEIGHT + upper_height + (BOTTOM_SHORTEN + TOP_SHORTEN) // 2
+    quick_door = QuickProgressDoor(WALL_WIDTH - 30, gap_center_y, name="右侧快速门")
+    doors.append(quick_door)
+
+    THICK = 60
+    INNER_W = 400
+    INNER_H = 400
+    OUTER_W = INNER_W + 2 * THICK
+    OUTER_H = INNER_H + 2 * THICK
+    center_x = GameConfig.WORLD_WIDTH // 2
+    center_y = GameConfig.WORLD_HEIGHT // 2
+    left = center_x - OUTER_W // 2
+    top = center_y - OUTER_H // 2
+    GAP_SIZE = 80
+    half_w = OUTER_W // 2
+    half_h = OUTER_H // 2
+    walls.append(Wall(left, top, half_w - GAP_SIZE//2, THICK, name="中央上墙左"))
+    walls.append(Wall(left + half_w + GAP_SIZE//2, top, half_w - GAP_SIZE//2, THICK, name="中央上墙右"))
+    bottom_y = top + OUTER_H - THICK
+    walls.append(Wall(left, bottom_y, half_w - GAP_SIZE//2, THICK, name="中央下墙左"))
+    walls.append(Wall(left + half_w + GAP_SIZE//2, bottom_y, half_w - GAP_SIZE//2, THICK, name="中央下墙右"))
+    walls.append(Wall(left, top + THICK, THICK, half_h - GAP_SIZE//2 - THICK, name="中央左墙上"))
+    walls.append(Wall(left, top + half_h + GAP_SIZE//2, THICK, half_h - GAP_SIZE//2, name="中央左墙下"))
+    right_x = left + OUTER_W - THICK
+    walls.append(Wall(right_x, top + THICK, THICK, half_h - GAP_SIZE//2 - THICK, name="中央右墙上"))
+    walls.append(Wall(right_x, top + half_h + GAP_SIZE//2, THICK, half_h - GAP_SIZE//2, name="中央右墙下"))
+    door_top = HorizontalIronDoor(left + half_w - GAP_SIZE//2, top + THICK//2 - 40, THICK, GAP_SIZE, name="中央上铁门")
+    door_bottom = BottomIronDoor(left + half_w - GAP_SIZE//2, bottom_y + THICK//2 - 40, THICK, GAP_SIZE, name="中央下铁门")
+    door_left = ThickProgressIronDoor(left + 15, top + half_h - GAP_SIZE//2 + 40, THICK, GAP_SIZE, name="中央左铁门")
+    door_right = RightQuickIronDoor(right_x + 20, top + half_h - GAP_SIZE//2, 30*(1/3), GAP_SIZE, name="中央右铁门")
+    doors.extend([door_top, door_bottom, door_left, door_right])
+
+    beacon_x = GameConfig.WORLD_WIDTH - 40
+    beacon_y = GameConfig.WORLD_HEIGHT // 2
+    escape_beacon = EscapeBeacon(beacon_x, beacon_y, radius=50)
+
+    qte_locks = [
+        QTELock(725, 100, width=80, height=100),
+        QTELock(880, 2030, width=80, height=100),
+        QTELock(2833, 1830, width=80, height=100),
+        QTELock(2937, 190, width=80, height=100)
+    ]
+    walls.append(Wall(472, 0, 614, 30, name="L型水平墙(472-1086)"))
+    walls.append(Wall(1070, 0, 30, 322, name="L型垂直墙(1082-1082,46-368)"))
+    walls.append(Wall(442, 0, 30, 322, name="新垂直墙-同尺寸"))
+    walls.append(Wall(470, 292, 140, 30, name="横向墙1(497-637)"))
+    walls.append(Wall(895, 292, 175, 30, name="横向墙2(869-1044)"))
+    walls.append(Wall(1526, 1848, 30, 286, name="房间右墙"))
+    walls.append(Wall(785, 2134, 771, 30, name="房间下墙"))
+    walls.append(Wall(755, 1890, 30, 272, name="房间左墙"))
+    walls.append(Wall(755, 1860, 310, 30, name="房间上墙"))
+    walls.append(Wall(2550, 1750, 665, 30, name="长水平墙(2523-3188)"))
+    walls.append(Wall(3188, 1750, 30, 443, name="右垂直墙(1692-2135)"))
+    walls.append(Wall(2550, 2134, 640, 30, name="新增水平墙(2583-3161)"))
+    walls.append(Wall(2551, 1780, 30, 140, name="新垂直墙1"))
+    walls.append(Wall(2650, 0, 30, 322, name="新垂直墙(2728,25向下)"))
+    walls.append(Wall(2050, 0, 600, 30, name="新水平墙(2023-2709,25)"))
+    walls.append(Wall(2020, 0, 30, 322, name="垂直墙"))
+    walls.append(Wall(2050, 292, 260, 30, name="水平墙"))
+    walls.append(Wall(2390, 292, 260, 30, name="水平墙"))
+    horizontal_door = HorizontalIronDoor(2310, 292, 30, 80, name="水平快速铁门")
+    doors.append(horizontal_door)
+
+    healing_zone = HealingZone(2581, 55, size=50)
+    return walls, doors, vents, escape_beacon, qte_locks, healing_zone
+
+# ==================== 主游戏运行函数 ====================
+def run_game(difficulty="简单", rocket_level_data=None, equipped_items=None):
+    global MEDKIT_COSTS
+    MEDKIT_COSTS = [200, 196, 192, 188, 184, 180, 176, 172, 168, 164, 160, 156, 152]
+    coins = 100
+    if equipped_items is None:
+        equipped_items = ['rocket', 'medkit', 'block', 'truck']
+    # 过滤掉 None 值，但保留列表长度用于槽位索引（局内数字键直接按索引取，需保证长度4）
+    while len(equipped_items) < 4:
+        equipped_items.append(None)
+    skip_intro_file = "skip_intro.txt"
+    
+    # 金币日志系统（最多保存5条记录）
+    coin_logs = []  # 每条记录: [amount, source, timer]
+    MAX_COIN_LOGS = 5
+    COIN_LOG_DURATION = 1.0  # 每条显示2秒
+    
+    # 玩家击倒计数
+    player_kill_count = 0
+    if os.path.exists(skip_intro_file):
+        with open(skip_intro_file, 'r') as f:
+            skip_intro = f.read().strip() == 'True'
+    else:
+        skip_intro = False
+
+    # ===== 大乱斗模式相关变量 =====
+    battle_royale_mode = (difficulty == "大乱斗")
+    br_initial_spawn_delay = 10.0          # 开局10秒后生成第一批
+    br_spawn_timer = br_initial_spawn_delay
+    br_initial_spawn_count = 10           # 第一批生成20个
+    br_initial_spawn_done = False
+    br_min_spawn_interval = 5.0
+    br_max_spawn_interval = 10.0
+    br_spawn_interval = random.uniform(br_min_spawn_interval, br_max_spawn_interval)
+    br_min_spawn_count = 5
+    br_max_spawn_count = 10
+    # =============================
+    # ===== 竞斗模式相关变量 =====
+    arena_mode = (difficulty == "竞斗")
+    arena_wave = 0                # 当前波次 (0:未开始, 1:第一批已生成, 2:第二批已生成)
+    arena_spawn_timer = 15.0      # 第一批生成计时器
+    arena_wave_spawned_1 = False
+    arena_wave_spawned_2 = False
+    # ===========================
+
+    debug_vars = {
+        'move_speed': GameConfig.PLAYER_SPEED / 100.0,
+        'sprint_speed': GameConfig.PLAYER_SPEED * GameConfig.SPRINT_MULTIPLIER / 600.0,
+        'ranged_damage': 56,
+        'attack_speed_scale': 1.0,
+        'god_mode': False,
+        'one_hit_kill': False,
+        'infinite_ammo': False,
+        'ranged_no_cd': False,
+        'no_recoil': False,
+        'noclip_mode': False,
+        'smoke_disable': False,
+        'infinite_range': False,
+        'bullet_through_walls': False,
+        'fast_interact': False,
+        'bullet_tracking': False,
+        'skip_intro': skip_intro,
+        'get_coins': False,
+        'bullet_count': 1,
+        'enemy_self_damage': False,
+        'unlimited_throw_range': False,
+        'no_item_cooldown': False,
+        'throw_range_multiplier': 1,
+        'infinite_throw': False,
+        'downed_use_items': False,
+        'hp_input_active': False,
+        'hp_input_value': '',
+        'enemy_hp_input_active': False,
+        'enemy_hp_input_value': '',
+        'enemy_speed_scale': 1.0,
+        'enemy_damage_scale': 1.0
+    }
+
+    def update_derived_params():
+        return {}
+
+    def fire_rocket_volley(base_direction):
+        count = int(debug_vars.get('bullet_count', 1))
+        count = max(1, min(500, count))
+        if count == 1:
+            directions = [base_direction]
+        else:
+            angle_step = 2.0
+            total_span = (count - 1) * angle_step
+            start_angle = -total_span / 2
+            directions = []
+            for i in range(count):
+                angle = start_angle + i * angle_step
+                rad = math.radians(angle)
+                directions.append(base_direction.rotate_rad(rad))
+        
+        for direction in directions:
+            offset_x = direction.x * 20
+            offset_y = direction.y * 20 - 5
+            speed_mult = debug_vars.get('attack_speed_scale', 1)
+            rocket = Rocket(
+                player.pos.x + offset_x, player.pos.y + offset_y,
+                direction,
+                GameConfig.ROCKET_SPEED_BASE * speed_mult,
+                rocket_range if debug_vars['infinite_range'] else rocket_range,
+                debug_vars['infinite_range'],
+                debug_vars.get('bullet_tracking', False),
+                is_enemy=False
+            )
+            player.rockets.append(rocket)
+        
+        if rocket_launch_sound:
+            rocket_launch_sound.play()
+        
+        if not debug_vars['ranged_no_cd']:
+            player.rocket_cooldown = GameConfig.ROCKET_COOLDOWN_FRAMES
+            player.cool_progress = 1.0
+        if not debug_vars['infinite_ammo']:
+            player.current_ammo -= 1
+            if player.current_ammo == 0 and player.reserve_ammo >= GameConfig.MAX_AMMO and not player.reloading:
+                player.reserve_ammo -= GameConfig.MAX_AMMO
+                player.reloading = True
+                player.reload_timer = GameConfig.RELOAD_TOTAL_FRAMES
+                player.reload_start_ammo = 0
+        if not debug_vars['no_recoil']:
+            recoil_speed = GameConfig.RECOIL_DISTANCE / GameConfig.RECOIL_DURATION
+            player.recoil_vel = -base_direction * recoil_speed
+            player.recoil_timer = GameConfig.RECOIL_DURATION
+        player.squat_offset = 9
+        player.squat_timer = 10
+    def fire_mortar_volley(target_pos):
+        count = int(debug_vars.get('bullet_count', 1))
+        count = max(1, min(500, count))
+        base_target = pygame.Vector2(target_pos)
+        if count == 1:
+            targets = [base_target]
+        else:
+            targets = []
+            angle_step = 2 * math.pi / count
+            offset_radius = 3.0
+            for i in range(count):
+                angle = i * angle_step
+                offset = pygame.Vector2(math.cos(angle), math.sin(angle)) * offset_radius
+                targets.append(base_target + offset)
+        # 获取跟踪目标和范围倍数
+        tracking_enemy = None
+        if debug_vars.get('bullet_tracking', False) and settings_menu.aim_assist and aim_assist_target and not mouse_moved_since_press:
+            tracking_enemy = aim_assist_target
+        range_mult = debug_vars.get('throw_range_multiplier', 1.0)
+        for t in targets:
+            mortar = MortarProjectile(player.pos.x, player.pos.y, t, damage=99, explosion_radius=160,
+                                      range_multiplier=range_mult, tracking_target=tracking_enemy,
+                                      bullet_tracking=debug_vars.get('bullet_tracking', False))
+            player.mortar_projectiles.append(mortar)
+        # 音效已在外层调用
+    derived = update_derived_params()
+
+    def has_rocket():
+        return rocket_level_data.get('level', 0) > 0
+
+    screen = pygame.display.set_mode((GameConfig.WINDOW_WIDTH, GameConfig.WINDOW_HEIGHT), pygame.FULLSCREEN | pygame.SCALED)
+    pygame.display.set_caption("暗木前哨 - 完整版")
+    clock = pygame.time.Clock()
+    half = GameConfig.PLAYER_SIZE / 2
+    margin = 60
+    min_x = int(30 + half + margin)
+    max_x = int(320 - half - margin)
+    min_y = int(930 + half + margin)
+    max_y = int(1230 - half - margin)
+    spawn_x = random.randint(min_x, max_x)
+    spawn_y = random.randint(min_y, max_y)
+    player = Player(spawn_x, spawn_y)
+    player.dead = False  # 用于4V1模式标记是否彻底死亡
+    if arena_mode:
+        player.hp = 500
+        player.max_hp = 500
+        coins = 20000
+    player.current_ammo = 0
+    debug_marker = None
+    walls, doors, vents, escape_beacon, qte_locks, healing_zone = build_world()
+
+    enemies = []
+    # 大乱斗和竞斗模式下不生成初始敌人
+    if not battle_royale_mode and not arena_mode:
+        if difficulty == "简单":
+            enemy_x = 3363.84
+            enemy_y = 991.60
+            enemies.append(AIEnemy(enemy_x, enemy_y))
+        elif difficulty == "困难":
+            positions = [(3363.84, 991.60), (3363.84, 1081.30)]
+            for x, y in positions:
+                enemies.append(AIEnemy(x, y))
+        else:
+            positions = [(3383.64, 1037.94), (3383.64, 939.24), (3383.64, 1147.44)]
+            for x, y in positions:
+                enemies.append(AIEnemy(x, y))
+    for enemy in enemies:
+        enemy.set_locks_reference(qte_locks)
+        enemy.enemies_list = enemies
+        enemy.debug_vars = debug_vars
+        enemy.disable_optimization = True   # 简单/困难/噩梦模式禁用距离优化
+        enemy.difficulty = difficulty       # 传递难度字符串
+
+    # 从装备列表中提取当前武器（仅一张武器卡，任意槽位均可）
+    current_weapon = None
+    for item in equipped_items:
+        if item in ('rocket', 'mortar'):
+            current_weapon = item
+            break
+
+    keys_collected = 0
+    last_unlocked_count = 0
+    message_text = ""
+    message_timer = 0.0
+    def set_message(msg):
+        nonlocal message_text, message_timer
+        message_text = msg
+        message_timer = 2.0
+
+    for door in doors:
+        if hasattr(door, 'show_message'):
+            door.show_message = set_message
+
+
+
+    def add_coins(amount, source=""):
+        nonlocal coins, coin_logs
+        coins += amount
+        # 播放音效
+        if coin_sound and amount > 0:
+            coin_sound.play()
+        # 添加日志记录
+        coin_logs.append([amount, source, COIN_LOG_DURATION])
+        # 保持最多 MAX_COIN_LOGS 条
+        if len(coin_logs) > MAX_COIN_LOGS:
+            coin_logs.pop(0)
+
+    def spend_coins(amount, source=""):
+        nonlocal coins, coin_logs
+        if coins < amount:
+            return False
+        coins -= amount
+        # 消费记录为负数
+        coin_logs.append([-amount, source, COIN_LOG_DURATION])
+        if len(coin_logs) > MAX_COIN_LOGS:
+            coin_logs.pop(0)
+        return True
+
+    for lock in qte_locks:
+        lock.set_reward_callback(add_coins)
+    for door in doors:
+        if hasattr(door, 'set_reward_callback'):
+            door.set_reward_callback(add_coins)
+
+    cam = Camera(GameConfig.WINDOW_WIDTH, GameConfig.WINDOW_HEIGHT)
+    vignette = pygame.Surface((GameConfig.WINDOW_WIDTH, GameConfig.WINDOW_HEIGHT), pygame.SRCALPHA)
+    cx, cy = GameConfig.WINDOW_WIDTH // 2, GameConfig.WINDOW_HEIGHT // 2
+    sigma = 280
+    overall_brightness = 0.80
+    min_alpha = 40
+    for y in range(GameConfig.WINDOW_HEIGHT):
+        for x in range(GameConfig.WINDOW_WIDTH):
+            dx = x - cx
+            dy = y - cy
+            dist_sq = dx*dx + dy*dy
+            brightness = math.exp(-dist_sq / (2 * sigma * sigma))
+            alpha = int(255 * (1 - brightness * overall_brightness))
+            if alpha < min_alpha:
+                alpha = min_alpha
+            alpha = max(0, min(255, alpha))
+            vignette.set_at((x, y), (0, 0, 0, alpha))
+    hurt_alpha = 0
+    game_over = False
+    game_win = False
+    win_timer = 0.0
+    game_over_timer = 0.0
+    debug_panel_visible = False
+    debug_scroll_y = 0
+    current_enemy_index = 0 
+    debug_max_scroll = 0
+    debug_controls = []
+    long_press_active = False
+    long_press_id = None
+    long_press_timer = 0
+    long_press_count = 0
+    chests = []
+    chest_spawn_timer = 10.0
+    game_time = 0.0
+    timeout_fade_alpha = 0
+    timeout_phase = 0
+    timeout_timer = 0.0
+
+    settings_menu = SettingsMenu()
+    show_f11_popup = False          # F11弹窗显示状态
+    aim_assist_target = None
+    mouse_moved_since_press = False
+    mouse_move_threshold = 30
+    initial_mouse_pos = (0, 0)
+
+    continuous_fire_timer = 0
+    CONTINUOUS_FIRE_INTERVAL = 5
+    continuous_throw_timer = 0
+    CONTINUOUS_THROW_INTERVAL = 5
+    continuous_block_timer = 0
+    CONTINUOUS_BLOCK_INTERVAL = 5
+    debug_coin_timer = 0.0
+    if rocket_level_data is None:
+        rocket_level_data = {'level': 0, 'cooldown': 0.98, 'damage': 56, 'range': 800,
+                             'medkit_level': 1, 'truck_level': 1, 'block_level': 1}
+    rocket_level_data['level'] = 0
+    rocket_cooldown_seconds = rocket_level_data['cooldown']
+    rocket_damage = rocket_level_data['damage']
+    rocket_range = rocket_level_data['range']
+    medkit_level = rocket_level_data.get('medkit_level', 1)
+    medkit_heal_amount = rocket_level_data.get('medkit_heal_amount', 100)
+    truck_level = rocket_level_data.get('truck_level', 1)
+    block_level = rocket_level_data.get('block_level', 1)
+    mortar_level = rocket_level_data.get('mortar_level', 1)
+    # 根据等级计算阻挡箱冷却时间
+    block_cd = 1.0 + (13 - block_level) * 0.125
+    player.block_cooldown_duration = max(1.0, block_cd)
+    # 临时：迫击炮数据
+    MORTAR_COOLDOWNS = [1.14, 1.10, 1.06, 1.02, 0.98, 0.94, 0.90, 0.86, 0.82, 0.78, 0.74, 0.70, 0.66]
+    mortar_cooldown_frames = int(MORTAR_COOLDOWNS[mortar_level - 1] * GameConfig.FPS) if mortar_level > 0 else 60
+    player.mortar_cooldown_frames = mortar_cooldown_frames
+    GameConfig.ROCKET_COOLDOWN_FRAMES = int(rocket_cooldown_seconds * GameConfig.FPS)
+    GameConfig.RANGED_DAMAGE_BASE = rocket_damage
+
+    # 迫击炮冷却时间（帧数）
+    mortar_cooldown_frames = int(MORTAR_COOLDOWNS[mortar_level - 1] * GameConfig.FPS) if mortar_level > 0 else 60
+    player.mortar_cooldown_frames = mortar_cooldown_frames
+
+    if debug_vars['skip_intro']:
+        game_state = "PLAYING"
+        cam.offset.x = player.pos.x - cam.w // 2
+        cam.offset.y = player.pos.y - cam.h // 2
+    else:
+        game_state = "INTRO"
+
+    intro_phase = 0
+    intro_timer = 0.0
+    intro_fade_alpha = 0
+    intro_text_alpha = 0
+    birth_center_x = (min_x + max_x) // 2
+    birth_center_y = (min_y + max_y) // 2
+    intro_camera_center = pygame.Vector2(birth_center_x, birth_center_y)
+    intro_horizontal_speed = 1000
+    escape_target = pygame.Vector2(escape_beacon.x, escape_beacon.y)
+
+    # ===== 缓存常用局部变量以提高性能 =====
+    world_width = GameConfig.WORLD_WIDTH
+    world_height = GameConfig.WORLD_HEIGHT
+    win_width = GameConfig.WINDOW_WIDTH
+    win_height = GameConfig.WINDOW_HEIGHT
+    collision_iter = GameConfig.COLLISION_ITERATIONS
+    max_ammo = GameConfig.MAX_AMMO
+    reload_total_frames = GameConfig.RELOAD_TOTAL_FRAMES
+    base_reload_interval = GameConfig.BASE_RELOAD_INTERVAL_FRAMES
+    rocket_cooldown_frames = GameConfig.ROCKET_COOLDOWN_FRAMES
+    recoil_dist = GameConfig.RECOIL_DISTANCE
+    recoil_dur = GameConfig.RECOIL_DURATION
+
+    running = True
+    while running:
+        dt = clock.tick(GameConfig.FPS) / 1000
+        if dt > 0.03:
+            dt = 0.03
+        if hurt_alpha > 0:
+            hurt_alpha -= 5.0 * dt * 255
+            if hurt_alpha < 0:
+                hurt_alpha = 0
+        # 更新金币日志计时器
+        for log in coin_logs:
+            if log[2] > 0:
+                log[2] -= dt
+        # 移除过期日志
+        coin_logs = [log for log in coin_logs if log[2] > 0]
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            if event.type == pygame.KEYDOWN:
+                if debug_vars.get('hp_input_active', False):
+                    if event.key == pygame.K_RETURN:
+                        if debug_vars['hp_input_value']:
+                            try:
+                                new_hp = int(debug_vars['hp_input_value'])
+                                new_hp = max(1, min(9999999, new_hp))
+                                player.hp = new_hp
+                                player.max_hp = new_hp
+                                if player.downed and player.hp > 0:
+                                    player.downed = False
+                                    player.downed_timer = 0.0
+                            except ValueError:
+                                pass
+                        debug_vars['hp_input_active'] = False
+                        debug_vars['hp_input_value'] = ''
+                    elif event.key == pygame.K_ESCAPE:
+                        debug_vars['hp_input_active'] = False
+                        debug_vars['hp_input_value'] = ''
+                    elif event.key == pygame.K_BACKSPACE:
+                        debug_vars['hp_input_value'] = debug_vars['hp_input_value'][:-1]
+                    elif event.unicode.isdigit():
+                        debug_vars['hp_input_value'] += event.unicode
+                    continue
+                elif debug_vars.get('enemy_hp_input_active', False):
+                    if event.key == pygame.K_RETURN:
+                        if debug_vars['enemy_hp_input_value']:
+                            try:
+                                new_hp = int(debug_vars['enemy_hp_input_value'])
+                                new_hp = max(1, min(9999999, new_hp))
+                                if enemies and 0 <= current_enemy_index < len(enemies):
+                                    enemy = enemies[current_enemy_index]
+                                    enemy.hp = new_hp
+                                    enemy.max_hp = new_hp
+                                    if enemy.downed and enemy.hp > 0:
+                                        enemy.downed = False
+                                        enemy.revive_timer = 0.0
+                            except ValueError:
+                                pass
+                        debug_vars['enemy_hp_input_active'] = False
+                        debug_vars['enemy_hp_input_value'] = ''
+                    elif event.key == pygame.K_ESCAPE:
+                        debug_vars['enemy_hp_input_active'] = False
+                        debug_vars['enemy_hp_input_value'] = ''
+                    elif event.key == pygame.K_BACKSPACE:
+                        debug_vars['enemy_hp_input_value'] = debug_vars['enemy_hp_input_value'][:-1]
+                    elif event.unicode.isdigit():
+                        debug_vars['enemy_hp_input_value'] += event.unicode
+                    continue
+                if event.key == pygame.K_ESCAPE:
+                    if player.truck_active:
+                        player.truck_cancel_request = True
+                    else:
+                        running = False
+                if event.key == pygame.K_F10:
+                    debug_vars['skip_intro'] = not debug_vars['skip_intro']
+                    with open("skip_intro.txt", 'w') as f:
+                        f.write(str(debug_vars['skip_intro']))
+                    if game_state == "INTRO":
+                        game_state = "PLAYING"
+                        cam.follow(player.pos)
+                if event.key == pygame.K_F11:
+                    show_f11_popup = True
+                    continue
+                if event.key == pygame.K_EQUALS:
+                    debug_panel_visible = not debug_panel_visible
+                if event.key == pygame.K_f and game_state == "PLAYING":
+                    # 倒地使用道具开关判断
+                    if player.downed and not debug_vars.get('downed_use_items', False):
+                        set_message("倒地状态无法购买弹药")
+                    else:
+                        # 判断当前武器
+                        if current_weapon == 'rocket':
+                            if rocket_level_data.get('level', 0) > 0:
+                                cost = 120
+                                if spend_coins(cost, "购买弹药"):
+                                    player.reserve_ammo += max_ammo
+                                    set_message(f"购买一个弹夹，+{max_ammo}备用弹药，-{cost}金币")
+                                    if player.current_ammo == 0 and not player.reloading and player.reserve_ammo >= max_ammo:
+                                        player.reserve_ammo -= max_ammo
+                                        player.reloading = True
+                                        player.reload_timer = reload_total_frames
+                                        player.reload_start_ammo = 0
+                                        set_message(f"自动装填开始，剩余备用弹药: {player.reserve_ammo}")
+                                else:
+                                    set_message("金币不足，无法购买弹夹")
+                            else:
+                                set_message("尚未购买火箭筒")
+                        elif current_weapon == 'mortar':
+                            if mortar_level > 0:
+                                cost = 120
+                                if spend_coins(cost, "购买迫击炮弹"):
+                                    # 增加一个弹夹的备用弹药
+                                    player.mortar_reserve_ammo += player.mortar_max_ammo
+                                    # 如果当前弹药为0且未在装弹，自动开始装填
+                                    if player.mortar_ammo == 0 and not player.mortar_reloading and player.mortar_reserve_ammo >= player.mortar_max_ammo:
+                                        player.mortar_reserve_ammo -= player.mortar_max_ammo
+                                        player.mortar_reloading = True
+                                        player.mortar_reload_timer = player.mortar_reload_time
+                                        player.mortar_cooldown = 0
+                                        set_message(f"购买一个弹夹，自动开始装填，-{cost}金币")
+                                    else:
+                                        set_message(f"购买一个弹夹，备用弹药+{player.mortar_max_ammo}，-{cost}金币")
+                                else:
+                                    set_message("金币不足，无法购买迫击炮弹")
+                            else:
+                                set_message("尚未购买迫击炮")
+                        else:
+                            set_message("未装备任何武器")
+                if event.key in (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4) and game_state == "PLAYING":
+                    slot_index = event.key - pygame.K_1
+                    if slot_index < len(equipped_items) and equipped_items[slot_index] is not None:
+                        item_id = equipped_items[slot_index]
+                        if item_id == 'medkit':
+                            # 检查是否携带了医疗包
+                            if 'medkit' not in equipped_items:
+                                set_message("未携带医疗包")
+                            elif medkit_level == 0:
+                                set_message("未拥有医疗包")
+                            elif player.downed and not debug_vars.get('downed_use_items', False):
+                                set_message("倒地状态无法使用医疗包")
+                            elif player.medkit_cooldown > 0 and not debug_vars.get('no_item_cooldown', False) and not debug_vars.get('infinite_throw', False):
+                                set_message(f"医疗包冷却中: {player.medkit_cooldown:.1f}s")
+                            else:
+                                if debug_vars.get('infinite_throw', False):
+                                    # 无限投掷模式：直接开启预览并启动连续投掷
+                                    player.medkit_preview = True
+                                    mx, my = pygame.mouse.get_pos()
+                                    world_mx = mx + cam.offset.x
+                                    world_my = my + cam.offset.y
+                                    target = pygame.Vector2(world_mx, world_my)
+                                    if not debug_vars.get('unlimited_throw_range', False):
+                                        max_dist = 600
+                                        if target.distance_to(player.pos) > max_dist:
+                                            target = player.pos + (target - player.pos).normalize() * max_dist
+                                    player.medkit_preview_pos = target
+                                    continuous_throw_timer = 0
+                                else:
+                                    # 非无限投掷：按下时开启预览（先检查金币）
+                                    cost = MEDKIT_COSTS[medkit_level - 1]
+                                    if coins >= cost:
+                                        player.medkit_preview = True
+                                        mx, my = pygame.mouse.get_pos()
+                                        world_mx = mx + cam.offset.x
+                                        world_my = my + cam.offset.y
+                                        target = pygame.Vector2(world_mx, world_my)
+                                        if not debug_vars.get('unlimited_throw_range', False):
+                                            max_dist = 600
+                                            if target.distance_to(player.pos) > max_dist:
+                                                target = player.pos + (target - player.pos).normalize() * max_dist
+                                        player.medkit_preview_pos = target
+                                    else:
+                                        set_message(f"金币不足，需要{cost}")
+                        elif item_id == 'rocket':
+                            current_level = rocket_level_data.get('level', 0)
+                            if current_level == 0:
+                                cost = 250
+                                if spend_coins(cost, "购买火箭筒"):
+                                    rocket_level_data['level'] = 1
+                                    debug_vars['bullet_count'] = 1
+                                    player.current_ammo = max_ammo
+                                    player.reloading = False
+                                    player.reload_timer = 0
+                                    player.rocket_cooldown = 0
+                                    set_message(f"购买一级火箭筒！消耗{cost}金币")
+                                    if buy_rocket_sound:
+                                        buy_rocket_sound.play()
+                                else:
+                                    set_message(f"金币不足，购买需要{cost}")
+                            elif current_level == 1:
+                                cost = 350
+                                if spend_coins(cost, "升级火箭筒"):
+                                    rocket_level_data['level'] = 2
+                                    debug_vars['bullet_count'] = 2
+                                    player.current_ammo = max_ammo
+                                    player.reloading = False
+                                    player.reload_timer = 0
+                                    player.rocket_cooldown = 0
+                                    set_message(f"火箭筒升级为二级！消耗{cost}金币")
+                                    if buy_rocket_sound:
+                                        buy_rocket_sound.play()
+                                else:
+                                    set_message(f"金币不足，升级需要{cost}")
+                            else:
+                                set_message("火箭筒已满级")
+                        elif item_id == 'block':
+                            # 检查是否携带了阻挡箱
+                            if 'block' not in equipped_items:
+                                set_message("未携带阻挡箱")
+                            elif block_level == 0:
+                                set_message("未拥有阻挡箱")
+                            elif player.downed and not debug_vars.get('downed_use_items', False):
+                                set_message("倒地状态无法使用阻挡箱")
+                            elif player.block_cooldown > 0 and not debug_vars.get('no_item_cooldown', False) and not debug_vars.get('infinite_throw', False):
+                                set_message(f"阻挡箱冷却中: {player.block_cooldown:.1f}s")
+                            else:
+                                if debug_vars.get('infinite_throw', False):
+                                    # 无限投掷模式：直接开启预览并启动连续放置
+                                    player.block_preview = True
+                                    mx, my = pygame.mouse.get_pos()
+                                    world_mx = mx + cam.offset.x
+                                    world_my = my + cam.offset.y
+                                    player.block_preview_pos = pygame.Vector2(world_mx, world_my)
+                                    continuous_block_timer = 0
+                                else:
+                                    # 非无限投掷：按下时开启预览（先检查金币）
+                                    def get_block_cost(level):
+                                        return int(100 - (level - 1) * (50 / 12))
+                                    cost = get_block_cost(block_level)
+                                    if coins >= cost:
+                                        player.block_preview = True
+                                        mx, my = pygame.mouse.get_pos()
+                                        world_mx = mx + cam.offset.x
+                                        world_my = my + cam.offset.y
+                                        player.block_preview_pos = pygame.Vector2(world_mx, world_my)
+                                    else:
+                                        set_message(f"金币不足，需要{cost}")
+                        elif item_id == 'truck':
+                            # 检查是否已购买（truck_level>0）
+                            if truck_level == 0:
+                                pass
+                            elif player.downed and not debug_vars.get('downed_use_items', False):
+                                pass
+                            elif player.truck_cooldown > 0 and not debug_vars.get('no_item_cooldown', False):
+                                pass
+                            elif player.truck_active:
+                                pass
+                            else:
+                                # 根据等级计算持续时间
+                                base_duration = 10.0
+                                duration = base_duration + (truck_level - 1) * 0.5
+                                player.truck_base_duration = duration
+                                player.truck_active = True
+                                player.truck_timer = duration
+                                player.truck_cancel_request = False
+                        elif item_id == 'mortar':
+                            current_level = player.mortar_level
+                            if current_level == 0:
+                                cost = 300
+                                if spend_coins(cost, "购买迫击炮"):
+                                    player.mortar_level = 1
+                                    player.mortar_max_ammo = 2
+                                    player.mortar_ammo = 2
+                                    player.mortar_reserve_ammo = 0     # 初始无备弹
+                                    player.mortar_reload_time = 2.5
+                                    # 同步更新 rocket_level_data 中的等级（用于局外显示）
+                                    rocket_level_data['mortar_level'] = 1
+                                    # 中断当前装弹，直接补满弹药，并重置冷却
+                                    player.mortar_reloading = False
+                                    player.mortar_reload_timer = 0
+                                    player.mortar_cooldown = 0
+                                    set_message(f"购买一级迫击炮！弹药2发，装弹2.5秒，消耗{cost}金币")
+                                    if buy_rocket_sound:
+                                        buy_rocket_sound.play()
+                                else:
+                                    set_message(f"金币不足，购买需要{cost}")
+                            elif current_level == 1:
+                                cost = 350
+                                if spend_coins(cost, "升级迫击炮"):
+                                    player.mortar_level = 2
+                                    player.mortar_max_ammo = 3
+                                    player.mortar_ammo = 3
+                                    # 备弹保持不变（不清零）
+                                    player.mortar_reload_time = 1.85
+                                    rocket_level_data['mortar_level'] = 2
+                                    # 中断当前装弹，直接补满弹药，并重置冷却
+                                    player.mortar_reloading = False
+                                    player.mortar_reload_timer = 0
+                                    player.mortar_cooldown = 0
+                                    set_message(f"迫击炮升至二级！弹药3发，装弹1.85秒，消耗{cost}金币")
+                                    if buy_rocket_sound:
+                                        buy_rocket_sound.play()
+                                else:
+                                    set_message(f"金币不足，升级需要{cost}")
+                            elif current_level == 2:
+                                cost = 600
+                                if spend_coins(cost, "升级迫击炮"):
+                                    player.mortar_level = 3
+                                    player.mortar_max_ammo = 4
+                                    player.mortar_ammo = 4
+                                    player.mortar_reload_time = 1.2
+                                    rocket_level_data['mortar_level'] = 3
+                                    # 中断当前装弹，直接补满弹药，并重置冷却
+                                    player.mortar_reloading = False
+                                    player.mortar_reload_timer = 0
+                                    player.mortar_cooldown = 0
+                                    set_message(f"迫击炮升至三级！弹药4发，装弹1.2秒，消耗{cost}金币")
+                                    if buy_rocket_sound:
+                                        buy_rocket_sound.play()
+                                else:
+                                    set_message(f"金币不足，升级需要{cost}")
+                            else:
+                                set_message("迫击炮已满级")
+                        else:
+                            set_message(f"未知道具: {item_id}")
+                    else:
+                        set_message(f"槽位 {slot_index + 1} 无道具")
+                if event.key == pygame.K_F1:
+                    pass
+                if event.key == pygame.K_F2:
+                    if debug_marker is None:
+                        debug_marker = (player.pos.x, player.pos.y)
+                    else:
+                        debug_marker = None
+                if event.key == pygame.K_e and game_state == "PLAYING":
+                    # 判断当前装备的武器
+                    weapon_type = current_weapon
+                    if weapon_type is None:
+                        set_message("未装备任何武器")
+                    elif weapon_type == 'rocket' and not has_rocket():
+                        set_message("尚未购买火箭筒")
+                    elif weapon_type == 'mortar' and mortar_level == 0:
+                        set_message("尚未拥有迫击炮")
+                    else:
+                        if weapon_type == 'rocket':
+                            # 火箭筒逻辑
+                            if settings_menu.continuous_attack:
+                                player.preview_mode = True
+                                player.preview_max_dist = rocket_range
+                                if settings_menu.aim_assist:
+                                    nearest = None
+                                    min_dist = 400
+                                    for enemy in enemies:
+                                        if not enemy.dead:
+                                            dist = player.pos.distance_to(enemy.pos)
+                                            if dist < min_dist:
+                                                min_dist = dist
+                                                nearest = enemy
+                                    aim_assist_target = nearest
+                                    initial_mouse_pos = pygame.mouse.get_pos()
+                                    mouse_moved_since_press = False
+                                continuous_fire_timer = 0
+                            else:
+                                can_shoot = (player.rocket_cooldown == 0 or debug_vars['ranged_no_cd'])
+                                if can_shoot and not player.reloading:
+                                    if debug_vars['infinite_ammo'] or player.current_ammo > 0:
+                                        player.preview_mode = True
+                                        if debug_vars.get('bullet_tracking', False) and debug_vars.get('infinite_range', False):
+                                            player.preview_max_dist = math.hypot(world_width, world_height)
+                                        else:
+                                            player.preview_max_dist = rocket_range
+                                        mx, my = pygame.mouse.get_pos()
+                                        world_mx = mx + cam.offset.x
+                                        world_my = my + cam.offset.y
+                                        dir_vec = pygame.Vector2(world_mx - player.pos.x, world_my - player.pos.y)
+                                        if dir_vec.length() > 0:
+                                            dir_vec.normalize_ip()
+                                        else:
+                                            dir_vec = pygame.Vector2(1 if not player.flip else -1, 0)
+                                        player.preview_dir = dir_vec
+                                        if settings_menu.aim_assist:
+                                            nearest = None
+                                            min_dist = 400
+                                            for enemy in enemies:
+                                                if not enemy.dead:
+                                                    dist = player.pos.distance_to(enemy.pos)
+                                                    if dist < min_dist:
+                                                        min_dist = dist
+                                                        nearest = enemy
+                                            aim_assist_target = nearest
+                                            initial_mouse_pos = pygame.mouse.get_pos()
+                                            mouse_moved_since_press = False
+                        else:  # mortar
+                            # 迫击炮逻辑
+                            if player.mortar_level == 0:
+                                set_message("尚未购买迫击炮")
+                            elif player.mortar_reloading:
+                                set_message("迫击炮装弹中")
+                            else:
+                                can_shoot = (player.mortar_cooldown == 0 or debug_vars['ranged_no_cd'])
+                                if can_shoot:
+                                    if debug_vars['infinite_ammo'] or player.mortar_ammo > 0:
+                                        player.mortar_preview = True
+                                        mx, my = pygame.mouse.get_pos()
+                                        world_mx = mx + cam.offset.x
+                                        world_my = my + cam.offset.y
+                                        player.mortar_preview_pos = pygame.Vector2(world_mx, world_my)
+                                        # 辅助瞄准初始化
+                                        if settings_menu.aim_assist:
+                                            nearest = None
+                                            min_dist = 400
+                                            for enemy in enemies:
+                                                if not enemy.dead:
+                                                    dist = player.pos.distance_to(enemy.pos)
+                                                    if dist < min_dist:
+                                                        min_dist = dist
+                                                        nearest = enemy
+                                            aim_assist_target = nearest
+                                            initial_mouse_pos = pygame.mouse.get_pos()
+                                            mouse_moved_since_press = False
+                                    else:
+                                        set_message("没有弹药")
+                                else:
+                                    set_message("迫击炮冷却中")
+            if event.type == pygame.KEYUP:
+                if event.key == pygame.K_e:
+                    if player.preview_mode:
+                        if not settings_menu.continuous_attack:
+                            direction = player.preview_dir
+                            if settings_menu.aim_assist and aim_assist_target and not mouse_moved_since_press:
+                                to_target = aim_assist_target.pos - player.pos
+                                if to_target.length() > 0:
+                                    direction = to_target.normalize()
+                            fire_rocket_volley(direction)
+                        player.preview_mode = False
+                        aim_assist_target = None
+
+                    if player.mortar_preview:
+                        # 松开E发射迫击炮
+                        if player.mortar_level == 0:
+                            set_message("尚未购买迫击炮")
+                        elif player.mortar_reloading:
+                            set_message("迫击炮装弹中")
+                        elif debug_vars['infinite_ammo'] or player.mortar_ammo > 0:
+                            target = player.mortar_preview_pos
+                            shoot_dir = (target - player.pos).normalize() if (target - player.pos).length() > 0 else pygame.Vector2(1, 0)
+                            # 调用散射函数
+                            fire_mortar_volley(target)
+                            if not debug_vars['infinite_ammo']:
+                                player.mortar_ammo -= 1
+                                if player.mortar_ammo == 0 and player.mortar_reserve_ammo >= player.mortar_max_ammo:
+                                    player.mortar_reserve_ammo -= player.mortar_max_ammo
+                                    player.mortar_reloading = True
+                                    player.mortar_reload_timer = player.mortar_reload_time
+                            if not debug_vars['ranged_no_cd']:
+                                player.mortar_cooldown = mortar_cooldown_frames
+                            if not debug_vars['no_recoil']:
+                                recoil_speed = GameConfig.RECOIL_DISTANCE / GameConfig.RECOIL_DURATION
+                                player.recoil_vel = -shoot_dir * recoil_speed
+                                player.recoil_timer = GameConfig.RECOIL_DURATION
+                                player.squat_offset = 9
+                                player.squat_timer = 10
+                            if mortar_launch_sound:
+                                mortar_launch_sound.play()
+                        else:
+                            set_message("没有弹药")
+                        player.mortar_preview = False
+                elif event.key == pygame.K_2:
+                    if debug_vars.get('infinite_throw', False):
+                        # 无限投掷模式：松开关闭预览
+                        player.medkit_preview = False
+                    else:
+                        # 非无限投掷：松开时完成投掷
+                        if player.medkit_preview:
+                            cost = MEDKIT_COSTS[medkit_level - 1]
+                            if spend_coins(cost, "医疗包"):
+                                target = player.medkit_preview_pos
+                                multiplier = debug_vars.get('throw_range_multiplier', 1)
+                                medkit = MedkitProjectile(player.pos.x, player.pos.y, target, speed=350, radius_multiplier=multiplier, heal_amount=medkit_heal_amount)
+                                player.medkits.append(medkit)
+                                if throw_sound:
+                                    throw_sound.play()
+                                if not debug_vars.get('no_item_cooldown', False):
+                                    player.medkit_cooldown = player.medkit_cooldown_duration
+                            else:
+                                set_message(f"金币不足，需要{cost}")
+                            player.medkit_preview = False
+                if event.key == pygame.K_4:
+                    # 阻挡箱松开生成（仅在非无限投掷模式下才立即生成一个，无限投掷模式下由连续逻辑处理）
+                    if player.block_preview and not debug_vars.get('infinite_throw', False):
+                        cost = 50  # 固定价格50金币
+                        if spend_coins(cost, "阻挡箱"):
+                            target_pos = player.block_preview_pos
+                            new_block = Block(target_pos.x, target_pos.y, size=90, duration=5.0)
+                            player.blocks.append(new_block)
+                            if block_place_sound:
+                                block_place_sound.play()
+                            if not debug_vars.get('no_item_cooldown', False):
+                                player.block_cooldown = player.block_cooldown_duration
+                        else:
+                            set_message(f"金币不足，需要{cost}")
+                        player.block_preview = False
+                    elif player.block_preview and debug_vars.get('infinite_throw', False):
+                        # 无限投掷模式下，松开按键时关闭预览
+                        player.block_preview = False
+            if event.type == pygame.MOUSEMOTION:
+                if player.preview_mode:
+                    mx, my = event.pos
+                    world_mx = mx + cam.offset.x
+                    world_my = my + cam.offset.y
+                    dir_vec = pygame.Vector2(world_mx - player.pos.x, world_my - player.pos.y)
+                    if dir_vec.length() > 0:
+                        dir_vec.normalize_ip()
+                        player.preview_dir = dir_vec
+                if player.medkit_preview:
+                    mx, my = event.pos
+                    world_mx = mx + cam.offset.x
+                    world_my = my + cam.offset.y
+                    target = pygame.Vector2(world_mx, world_my)
+                    if not debug_vars.get('unlimited_throw_range', False):
+                        max_dist = 600
+                        if target.distance_to(player.pos) > max_dist:
+                            target = player.pos + (target - player.pos).normalize() * max_dist
+                    player.medkit_preview_pos = target
+                if player.block_preview:
+                    mx, my = event.pos
+                    world_mx = mx + cam.offset.x
+                    world_my = my + cam.offset.y
+                    player.block_preview_pos = pygame.Vector2(world_mx, world_my)
+                if player.mortar_preview:
+                    mx, my = event.pos
+                    world_mx = mx + cam.offset.x
+                    world_my = my + cam.offset.y
+                    player.mortar_preview_pos = pygame.Vector2(world_mx, world_my)
+                    if settings_menu.aim_assist and aim_assist_target and not mouse_moved_since_press:
+                        # 如果鼠标移动超过阈值，则取消吸附
+                        dx = event.pos[0] - initial_mouse_pos[0]
+                        dy = event.pos[1] - initial_mouse_pos[1]
+                        if math.hypot(dx, dy) > mouse_move_threshold:
+                            mouse_moved_since_press = True
+                    if settings_menu.aim_assist and aim_assist_target and not mouse_moved_since_press:
+                        player.mortar_preview_pos = aim_assist_target.pos
+                if settings_menu.aim_assist and aim_assist_target:
+                    dx = event.pos[0] - initial_mouse_pos[0]
+                    dy = event.pos[1] - initial_mouse_pos[1]
+                    if math.hypot(dx, dy) > mouse_move_threshold:
+                        mouse_moved_since_press = True
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                if show_f11_popup:
+                    mouse_pos = pygame.mouse.get_pos()
+                    popup_w, popup_h = 600, 250
+                    popup_rect = pygame.Rect(0, 0, popup_w, popup_h)
+                    popup_rect.center = (win_width // 2, win_height // 2)
+                    cancel_btn = pygame.Rect(popup_rect.left + 40, popup_rect.bottom - 60, 100, 40)
+                    exit_btn = pygame.Rect(popup_rect.right - 140, popup_rect.bottom - 60, 100, 40)
+                    if cancel_btn.collidepoint(mouse_pos):
+                        show_f11_popup = False
+                    elif exit_btn.collidepoint(mouse_pos):
+                        running = False
+                        return
+                    elif not popup_rect.collidepoint(mouse_pos):
+                        show_f11_popup = False
+                    continue  # 弹窗打开时忽略其他点击
+                if event.button == 1:
+                    mouse_pos = pygame.mouse.get_pos()
+                    
+                    # 如果调试面板可见，且点击位置不在面板内，则关闭面板
+                    if debug_panel_visible:
+                        panel_rect = pygame.Rect(DEBUG_PANEL_X, DEBUG_PANEL_Y, DEBUG_PANEL_WIDTH, DEBUG_PANEL_HEIGHT)
+                        if not panel_rect.collidepoint(mouse_pos):
+                            debug_panel_visible = False
+                            # 关闭输入激活状态
+                            debug_vars['hp_input_active'] = False
+                            debug_vars['hp_input_value'] = ''
+                            continue  # 跳过后续处理
+                    
+                    result = settings_menu.handle_click(mouse_pos)
+                    if result == "exit":
+                        return
+                    elif result:
+                        pass
+                    elif debug_panel_visible:
+                        for ctrl in debug_controls:
+                            if ctrl[1].collidepoint(mouse_pos):
+                                if ctrl[0] == "button":
+                                    long_press_active = True
+                                    long_press_id = ctrl[2]
+                                    long_press_timer = GameConfig.LONG_PRESS_DELAY
+                                    long_press_count = 0
+                                    key = ctrl[2]
+                                    step = 0.5
+                                    if key.endswith("_dec"):
+                                        var = key[:-4]
+                                        if var == 'move_speed':
+                                            debug_vars['move_speed'] = max(1, debug_vars['move_speed'] - step)
+                                        elif var == 'sprint_speed':
+                                            debug_vars['sprint_speed'] = max(0.5, debug_vars['sprint_speed'] - step)
+                                        elif var == 'ranged_damage':
+                                            debug_vars['ranged_damage'] = max(1, debug_vars['ranged_damage'] - 1) 
+                                        elif var == 'attack_speed_scale':
+                                            debug_vars['attack_speed_scale'] = max(1, debug_vars['attack_speed_scale'] - 1)
+                                        elif var == 'bullet_count' and debug_vars['bullet_count'] > 1:
+                                            debug_vars['bullet_count'] -= 1
+                                        elif var == 'throw_range_multiplier' and debug_vars['throw_range_multiplier'] > 1:
+                                            debug_vars['throw_range_multiplier'] -= 1
+                                        elif key == "enemy_speed_dec":
+                                            debug_vars['enemy_speed_scale'] = max(0.1, debug_vars.get('enemy_speed_scale', 1.0) - 0.1)
+                                        elif key == "enemy_damage_dec":
+                                            debug_vars['enemy_damage_scale'] = max(0.1, debug_vars.get('enemy_damage_scale', 1.0) - 0.1)
+                                    elif key.endswith("_inc"):
+                                        var = key[:-4]
+                                        if var == 'move_speed':
+                                            debug_vars['move_speed'] = min(20, debug_vars['move_speed'] + step)
+                                        elif var == 'sprint_speed':
+                                            debug_vars['sprint_speed'] = min(10, debug_vars['sprint_speed'] + step)
+                                        elif var == 'ranged_damage':
+                                            debug_vars['ranged_damage'] += 1
+                                        elif var == 'attack_speed_scale':
+                                            debug_vars['attack_speed_scale'] = min(20, debug_vars['attack_speed_scale'] + 1)
+                                        elif var == 'bullet_count' and debug_vars['bullet_count'] < 500:
+                                            debug_vars['bullet_count'] += 1
+                                        elif var == 'throw_range_multiplier' and debug_vars['throw_range_multiplier'] < 10:
+                                            debug_vars['throw_range_multiplier'] += 1
+                                        elif key == "enemy_speed_inc":
+                                            debug_vars['enemy_speed_scale'] = min(5.0, debug_vars.get('enemy_speed_scale', 1.0) + 0.1)
+                                        elif key == "enemy_damage_inc":
+                                            debug_vars['enemy_damage_scale'] = min(10.0, debug_vars.get('enemy_damage_scale', 1.0) + 0.1)
+                                    elif key == "enemy_prev":
+                                        if enemies:
+                                            alive = [e for e in enemies if not e.dead]
+                                            if alive:
+                                                total = len(alive)
+                                                # 先将当前索引转换为存活列表中的索引
+                                                # 简单起见，直接在存活列表上计算新索引
+                                                current_enemy_index = (current_enemy_index - 1) % total
+                                    elif key == "enemy_next":
+                                        if enemies:
+                                            alive = [e for e in enemies if not e.dead]
+                                            if alive:
+                                                total = len(alive)
+                                                current_enemy_index = (current_enemy_index + 1) % total
+                                    elif key == "enemy_hp_confirm":
+                                        if debug_vars.get('enemy_hp_input_active', False):
+                                            if debug_vars.get('enemy_hp_input_value', ''):
+                                                try:
+                                                    new_hp = int(debug_vars['enemy_hp_input_value'])
+                                                    new_hp = max(1, min(9999999, new_hp))
+                                                    if enemies:
+                                                        alive = [e for e in enemies if not e.dead]
+                                                        if alive and 0 <= current_enemy_index < len(alive):
+                                                            enemy = alive[current_enemy_index]
+                                                            enemy.hp = new_hp
+                                                            enemy.max_hp = new_hp
+                                                            if enemy.downed and enemy.hp > 0:
+                                                                enemy.downed = False
+                                                                enemy.revive_timer = 0.0
+                                                except ValueError:
+                                                    pass
+                                            debug_vars['enemy_hp_input_active'] = False
+                                            debug_vars['enemy_hp_input_value'] = ''
+                                    derived = update_derived_params()
+                                elif ctrl[0] == "switch":
+                                    key = ctrl[2]
+                                    if key == 'get_coins':
+                                        debug_vars[key] = not debug_vars[key]
+                                    else:
+                                        debug_vars[key] = not debug_vars[key]
+                                elif ctrl[0] == "input":
+                                    if ctrl[2] == "hp_input":
+                                        debug_vars['hp_input_active'] = True
+                                        debug_vars['hp_input_value'] = ''
+                                    elif ctrl[2] == "enemy_hp_input":
+                                        debug_vars['enemy_hp_input_active'] = True
+                                        debug_vars['enemy_hp_input_value'] = ''
+                                elif ctrl[0] == "button" and ctrl[2] == "hp_confirm":
+                                    if debug_vars['hp_input_value']:
+                                        try:
+                                            new_hp = int(debug_vars['hp_input_value'])
+                                            new_hp = max(1, min(9999999, new_hp))
+                                            player.hp = new_hp
+                                            player.max_hp = new_hp
+                                            if player.downed and player.hp > 0:
+                                                player.downed = False
+                                                player.downed_timer = 0.0
+                                            debug_vars['hp_input_active'] = False
+                                            debug_vars['hp_input_value'] = ''
+                                        except ValueError:
+                                            pass
+                    elif game_state == "PLAYING":
+                        mouse_pos = pygame.mouse.get_pos()
+                        for qte_lock in qte_locks:
+                            if qte_lock.state == 'calibrating' and not qte_lock.is_unlocked:
+                                qte_lock.handle_calibration_click(mouse_pos, player.rect, player)
+                                break
+                elif event.button == 4 and debug_panel_visible:
+                    debug_scroll_y = max(0, debug_scroll_y - 30)
+                elif event.button == 5 and debug_panel_visible:
+                    debug_scroll_y = min(debug_max_scroll, debug_scroll_y + 30)
+            if event.type == pygame.MOUSEBUTTONUP:
+                if event.button == 1:
+                    long_press_active = False
+                    long_press_id = None
+                    long_press_count = 0
+        if long_press_active and long_press_id is not None:
+            if long_press_timer <= 0:
+                long_press_count += 1
+                speed_factor = 1 + (long_press_count // 5) * 0.5
+                key = long_press_id
+                step = 0.5 * speed_factor
+                if key.endswith("_dec"):
+                    var = key[:-4]
+                    if var == 'move_speed':
+                        debug_vars['move_speed'] = max(1, debug_vars['move_speed'] - step)
+                    elif var == 'sprint_speed':
+                        debug_vars['sprint_speed'] = max(0.5, debug_vars['sprint_speed'] - step)
+                    elif var == 'ranged_damage':
+                        debug_vars['ranged_damage'] = max(1, debug_vars['ranged_damage'] - int(step)) 
+                    elif var == 'attack_speed_scale':
+                        debug_vars['attack_speed_scale'] = max(1, debug_vars['attack_speed_scale'] - int(step))
+                    elif var == 'bullet_count' and debug_vars['bullet_count'] > 1:
+                        debug_vars['bullet_count'] = max(1, debug_vars['bullet_count'] - int(step))
+                    elif var == 'throw_range_multiplier' and debug_vars['throw_range_multiplier'] > 1:
+                        debug_vars['throw_range_multiplier'] = max(1, debug_vars['throw_range_multiplier'] - int(step))
+                    elif key == "enemy_speed_dec":
+                        debug_vars['enemy_speed_scale'] = max(0.1, debug_vars.get('enemy_speed_scale', 1.0) - 0.1)
+                    elif key == "enemy_damage_dec":
+                        debug_vars['enemy_damage_scale'] = max(0.1, debug_vars.get('enemy_damage_scale', 1.0) - 0.1)
+                elif key.endswith("_inc"):
+                    var = key[:-4]
+                    if var == 'move_speed':
+                        debug_vars['move_speed'] = min(20, debug_vars['move_speed'] + step)
+                    elif var == 'sprint_speed':
+                        debug_vars['sprint_speed'] = min(10, debug_vars['sprint_speed'] + step)
+                    elif var == 'ranged_damage':
+                        debug_vars['ranged_damage'] += int(step) 
+                    elif var == 'attack_speed_scale':
+                        debug_vars['attack_speed_scale'] = min(20, debug_vars['attack_speed_scale'] + int(step))
+                    elif var == 'bullet_count' and debug_vars['bullet_count'] < 500:
+                        debug_vars['bullet_count'] = min(500, debug_vars['bullet_count'] + int(step))
+                    elif var == 'throw_range_multiplier' and debug_vars['throw_range_multiplier'] < 10:
+                        debug_vars['throw_range_multiplier'] = min(10, debug_vars['throw_range_multiplier'] + int(step))
+                    elif key == "enemy_speed_inc":
+                        debug_vars['enemy_speed_scale'] = min(5.0, debug_vars.get('enemy_speed_scale', 1.0) + 0.1)
+                    elif key == "enemy_damage_inc":
+                        debug_vars['enemy_damage_scale'] = min(10.0, debug_vars.get('enemy_damage_scale', 1.0) + 0.1)
+                derived = update_derived_params()
+                long_press_timer = max(1, GameConfig.LONG_PRESS_INTERVAL - long_press_count)
+            else:
+                long_press_timer -= 1
+        if player.reloading:
+            player.reload_timer -= 1
+            elapsed = reload_total_frames - player.reload_timer
+            recovered = elapsed // base_reload_interval
+            player.current_ammo = min(max_ammo, player.reload_start_ammo + recovered)
+            player.reload_progress = min(1.0, elapsed / reload_total_frames)
+            if player.reload_timer <= 0:
+                player.reloading = False
+                player.current_ammo = max_ammo
+        else:
+            player.reload_progress = 0.0
+
+        # 迫击炮装弹更新
+        if player.mortar_reloading:
+            player.mortar_reload_timer -= dt
+            if player.mortar_reload_timer <= 0:
+                player.mortar_reloading = False
+                player.mortar_ammo = player.mortar_max_ammo
+                set_message("迫击炮装弹完成")
+
+        # ===== 游戏状态机 =====
+        if game_state == "INTRO":
+            if intro_phase == 0:
+                target_x = escape_target.x
+                diff = target_x - intro_camera_center.x
+                if abs(diff) > 0:
+                    move = min(abs(diff), intro_horizontal_speed * dt)
+                    intro_camera_center.x += move if diff > 0 else -move
+                if abs(intro_camera_center.x - target_x) < 2:
+                    intro_phase = 1
+                    intro_timer = 0.0
+            elif intro_phase == 1:
+                intro_timer += dt
+                if intro_timer >= 0.5:
+                    intro_phase = 2
+                    intro_timer = 0.0
+                    intro_fade_alpha = 0
+            elif intro_phase == 2:
+                intro_fade_alpha = min(255, intro_fade_alpha + dt * 400)
+                if intro_fade_alpha >= 255:
+                    intro_phase = 3
+                    intro_timer = 0.0
+                    intro_text_alpha = 0
+            elif intro_phase == 3:
+                intro_text_alpha = min(255, intro_text_alpha + dt * 400)
+                if intro_text_alpha >= 255:
+                    intro_phase = 4
+                    intro_timer = 0.0
+            elif intro_phase == 4:
+                intro_timer += dt
+                if intro_timer >= 1.0:
+                    intro_phase = 5
+                    intro_timer = 0.0
+            elif intro_phase == 5:
+                intro_text_alpha = max(0, intro_text_alpha - dt * 400)
+                if intro_text_alpha <= 0:
+                    intro_phase = 6
+                    intro_timer = 0.0
+                    intro_fade_alpha = 255
+                    intro_camera_center = pygame.Vector2(player.pos.x, player.pos.y)
+            elif intro_phase == 6:
+                intro_fade_alpha = max(0, intro_fade_alpha - dt * 400)
+                if intro_fade_alpha <= 0:
+                    game_state = "PLAYING"
+                    cam.follow(player.pos)
+            cam.offset.x = intro_camera_center.x - cam.w // 2
+            cam.offset.y = intro_camera_center.y - cam.h // 2
+            cam.offset.x = max(0, min(world_width - cam.w, cam.offset.x))
+            cam.offset.y = max(0, min(world_height - cam.h, cam.offset.y))
+            escape_beacon.update(dt)
+
+        elif game_state == "PLAYING":
+            game_time += dt
+            # ===== 大乱斗模式AI生成逻辑 =====
+            if battle_royale_mode and not game_win and not game_over:
+                if not br_initial_spawn_done:
+                    br_spawn_timer -= dt
+                    if br_spawn_timer <= 0.0:
+                        for _ in range(br_initial_spawn_count):
+                            spawn_x = random.uniform(50, world_width - 50)
+                            spawn_y = random.uniform(50, world_height - 50)
+                            new_enemy = AIEnemy(spawn_x, spawn_y)
+                            new_enemy.revivable = False
+                            new_enemy.set_locks_reference(qte_locks)
+                            new_enemy.enemies_list = enemies
+                            new_enemy.debug_vars = debug_vars
+                            enemies.append(new_enemy)
+                        br_initial_spawn_done = True
+                        br_spawn_timer = random.uniform(br_min_spawn_interval, br_max_spawn_interval)
+                else:
+                    br_spawn_timer -= dt
+                    if br_spawn_timer <= 0.0:
+                        spawn_count = random.randint(br_min_spawn_count, br_max_spawn_count)
+                        for _ in range(spawn_count):
+                            spawn_x = random.uniform(50, world_width - 50)
+                            spawn_y = random.uniform(50, world_height - 50)
+                            new_enemy = AIEnemy(spawn_x, spawn_y)
+                            new_enemy.revivable = False
+                            new_enemy.set_locks_reference(qte_locks)
+                            new_enemy.enemies_list = enemies
+                            new_enemy.debug_vars = debug_vars
+                            enemies.append(new_enemy)
+                        br_spawn_timer = random.uniform(br_min_spawn_interval, br_max_spawn_interval)
+            # ===== 竞斗模式波次生成 =====
+            if arena_mode and not game_win and not game_over:
+                # 使用波次计数变量 arena_wave_count，0表示尚未生成第一波
+                # 波次数量：共10波，第1波数量10，第2波20，后续逐波翻倍
+                # 波次时间：第1波15秒，第2波再30秒，之后每波间隔20秒
+                if 'arena_wave_count' not in locals():
+                    arena_wave_count = 0
+                if 'arena_next_spawn_timer' not in locals():
+                    arena_next_spawn_timer = 15.0  # 第一波15秒后生成
+                if arena_wave_count < 10:
+                    arena_next_spawn_timer -= dt
+                    if arena_next_spawn_timer <= 0.0:
+                        arena_wave_count += 1
+                        # 计算本波敌人数量
+                        if arena_wave_count == 1:
+                            spawn_count = 10
+                            next_interval = 30.0
+                        elif arena_wave_count == 2:
+                            spawn_count = 20
+                            next_interval = 20.0
+                        else:
+                            # 第三波开始每波数量翻倍：第三波40，第四波80...
+                            spawn_count = 20 * (2 ** (arena_wave_count - 2))
+                            next_interval = 20.0
+                        # 生成敌人
+                        for _ in range(spawn_count):
+                            spawn_x = random.uniform(50, world_width - 50)
+                            spawn_y = random.uniform(50, world_height - 50)
+                            new_enemy = AIEnemy(spawn_x, spawn_y)
+                            new_enemy.revivable = False
+                            new_enemy.set_locks_reference(qte_locks)
+                            new_enemy.enemies_list = enemies
+                            new_enemy.debug_vars = debug_vars
+                            enemies.append(new_enemy)
+                        # 如果未完成10波，设置下一波计时器
+                        if arena_wave_count < 10:
+                            arena_next_spawn_timer = next_interval
+        
+            if game_time >= 600.0 and not game_win and not game_over:
+                game_state = "TIMEOUT"
+                timeout_phase = 0
+                timeout_timer = 0.0
+                timeout_fade_alpha = 0
+                continue
+            if hurt_alpha > 0:
+                hurt_alpha -= 5.0 * dt * 255
+                if hurt_alpha < 0:
+                    hurt_alpha = 0
+            if player.reloading:
+                player.reload_timer -= 1
+                elapsed = reload_total_frames - player.reload_timer
+                recovered = elapsed // base_reload_interval
+                player.current_ammo = min(max_ammo, player.reload_start_ammo + recovered)
+                player.reload_progress = min(1.0, elapsed / reload_total_frames)
+                if player.reload_timer <= 0:
+                    player.reloading = False
+                    player.current_ammo = max_ammo
+            else:
+                player.reload_progress = 0.0
+            if game_win:
+                win_timer += dt
+                if win_timer >= 3.0:
+                    running = False
+            elif game_over:
+                game_over_timer += dt
+                if game_over_timer >= 3.0:
+                    running = False
+            else:
+                keys = pygame.key.get_pressed()
+                move_spd = debug_vars['move_speed'] * 100
+                sprint_spd = debug_vars['sprint_speed'] * 600
+                escape_beacon.update(dt)
+                player.update(dt, keys, move_spd, sprint_spd)
+
+                # 更新医疗包预览位置（每帧根据鼠标位置计算）
+                if player.medkit_preview:
+                    mx, my = pygame.mouse.get_pos()
+                    world_mx = mx + cam.offset.x
+                    world_my = my + cam.offset.y
+                    target = pygame.Vector2(world_mx, world_my)
+                    if not debug_vars.get('unlimited_throw_range', False):
+                        max_dist = 600
+                        if target.distance_to(player.pos) > max_dist:
+                            target = player.pos + (target - player.pos).normalize() * max_dist
+                    player.medkit_preview_pos = target
+                healing_zone.update(dt, player)
+                # 只有当玩家真正死亡（非倒地状态且血量<=0）或者倒地倒计时结束且未复活时，才游戏结束
+                if not debug_vars['god_mode']:
+                    if player.downed:
+                        # 倒地在更新循环中已处理倒计时和复活，此处仅当倒计时归零且未复活时判定结束
+                        # 但游戏结束标志已在 medkit 更新循环中设置，这里只需保持原样
+                        pass
+                    elif player.hp <= 0:
+                        game_over = True
+                for qte_lock in qte_locks:
+                    qte_lock.update(dt, player.rect, player, keys_collected, debug_vars)
+                    if qte_lock.knockback_vector is not None:
+                        player.pos += qte_lock.knockback_vector
+                        half_size = player.size / 2
+                        player.pos.x = max(half_size, min(world_width - half_size, player.pos.x))
+                        player.pos.y = max(half_size, min(world_height - half_size, player.pos.y))
+                        player.rect.center = (round(player.pos.x), round(player.pos.y))
+                        qte_lock.knockback_vector = None
+                current_unlocked = sum(1 for lock in qte_locks if lock.is_unlocked)
+                if current_unlocked > last_unlocked_count:
+                    keys_collected = current_unlocked
+                    set_message(f"获得{keys_collected}把钥匙")
+                    if key_pickup_sound:
+                        key_pickup_sound.play()
+                    last_unlocked_count = keys_collected
+                for door in doors:
+                    if isinstance(door, RedHorizontalDoor):
+                        door.update(dt, player.rect, keys_collected, debug_vars)
+                    elif hasattr(door, 'update') and 'player_rect' in door.update.__code__.co_varnames:
+                        if 'debug_vars' in door.update.__code__.co_varnames:
+                            door.update(dt, player.rect, debug_vars)
+                        else:
+                            door.update(dt, player.rect)
+                    else:
+                        door.update(dt)
+                for chest in chests[:]:
+                    if chest.opened:
+                        chests.remove(chest)
+                        continue
+                    chest.update(dt, player.rect, debug_vars)
+                if game_time >= 10.0 and len(chests) < GameConfig.MAX_CHESTS:
+                    if chest_spawn_timer <= 0.0:
+                        buffer = 50
+                        birth_min_x = min_x - buffer
+                        birth_max_x = max_x + buffer
+                        birth_min_y = min_y - buffer
+                        birth_max_y = max_y + buffer
+                        beacon_x, beacon_y = escape_beacon.x, escape_beacon.y
+                        beacon_radius = escape_beacon.base_radius + buffer
+                        lock_exclusion_radius = 80 + buffer
+                        def is_excluded(x, y):
+                            if birth_min_x <= x <= birth_max_x and birth_min_y <= y <= birth_max_y:
+                                return True
+                            if math.hypot(x - beacon_x, y - beacon_y) <= beacon_radius:
+                                return True
+                            for lock in qte_locks:
+                                if math.hypot(x - lock.x, y - lock.y) <= lock_exclusion_radius:
+                                    return True
+                            return False
+                        for _ in range(50):
+                            spawn_x = random.uniform(max(50, world_width / 4), world_width - 50)
+                            spawn_y = random.uniform(50, world_height - 50)
+                            if is_excluded(spawn_x, spawn_y):
+                                continue
+                            new_rect = pygame.Rect(spawn_x - GameConfig.CHEST_SIZE // 2,
+                                                   spawn_y - GameConfig.CHEST_SIZE // 2,
+                                                   GameConfig.CHEST_SIZE, GameConfig.CHEST_SIZE)
+                            overlap_found = False
+                            for wall in walls:
+                                if wall.rect.colliderect(new_rect):
+                                    overlap_found = True
+                                    break
+                            if overlap_found: continue
+                            for door in doors:
+                                if hasattr(door, 'gap_rect') and door.gap_rect.colliderect(new_rect):
+                                    overlap_found = True
+                                    break
+                            if overlap_found: continue
+                            for chest in chests:
+                                if chest.rect.colliderect(new_rect):
+                                    overlap_found = True
+                                    break
+                            if overlap_found: continue
+                            for lock in qte_locks:
+                                if lock.rect.colliderect(new_rect):
+                                    overlap_found = True
+                                    break
+                            if overlap_found: continue
+                            new_chest = Chest(spawn_x, spawn_y, GameConfig.CHEST_SIZE)
+                            new_chest.set_reward_callback(add_coins)
+                            chests.append(new_chest)
+                            break
+                        chest_spawn_timer = 20.0
+                    else:
+                        chest_spawn_timer -= dt
+                else:
+                    chest_spawn_timer = max(0.0, chest_spawn_timer - dt)
+
+                for enemy in enemies:
+                    enemy.update(dt, player, walls, doors, chests)
+                    for rocket in enemy.rockets[:]:
+                        if rocket.active and not rocket.exploded:
+                            if not player.downed and player.rect.collidepoint(rocket.x, rocket.y):
+                                if not debug_vars['god_mode']:
+                                    dmg = int(56 * debug_vars.get('enemy_damage_scale', 1.0))
+                                    player.take_damage(dmg)
+                                    knockback_dir = pygame.Vector2(rocket.vx, rocket.vy)
+                                    if knockback_dir.length() > 0:
+                                        knockback_dir.normalize_ip()
+                                        player.recoil_vel += knockback_dir * 600
+                                        player.recoil_timer = max(player.recoil_timer, 0.4)
+                                rocket.explode()
+                                hurt_alpha = 200
+                            if debug_vars.get('enemy_self_damage', False):
+                                for other_enemy in enemies:
+                                    if other_enemy is enemy:
+                                        continue
+                                    if other_enemy.dead or other_enemy.downed:
+                                        continue
+                                    if other_enemy.rect.collidepoint(rocket.x, rocket.y):
+                                        dmg = int(56 * debug_vars.get('enemy_damage_scale', 1.0))
+                                        other_enemy.take_damage(dmg)
+                                        rocket.explode()
+                                        knockback_dir = pygame.Vector2(rocket.vx, rocket.vy)
+                                        if knockback_dir.length() > 0:
+                                            knockback_dir.normalize_ip()
+                                            other_enemy.recoil_vel += knockback_dir * 600
+                                            other_enemy.recoil_timer = max(other_enemy.recoil_timer, 0.4)
+                                        break
+
+
+                        for wall in walls:
+                            if wall.rect.collidepoint(rocket.x, rocket.y):
+                                rocket.explode()
+                                break
+                        for door in doors:
+                            if hasattr(door, 'gap_rect') and door.gap_rect.collidepoint(rocket.x, rocket.y):
+                                rocket.explode()
+                                break
+                        for chest in chests:
+                            if not chest.opened and chest.rect.collidepoint(rocket.x, rocket.y):
+                                rocket.explode()
+                                break
+                        for block in player.blocks:
+                            if block.active and not block.destroyed:
+                                if block.rect.collidepoint(rocket.x, rocket.y):
+                                    rocket.explode()
+                                    block.take_damage(56)
+                                    break
+
+                if not debug_vars['noclip_mode']:
+                    player_rect = player.rect.copy()
+                    for _ in range(collision_iter):
+                        collided = False
+                        for wall in walls:
+                            collides, overlap, axis = wall.check_collision(player_rect)
+                            if collides:
+                                player.pos.x += axis[0] * overlap
+                                player.pos.y += axis[1] * overlap
+                                player_rect.center = (round(player.pos.x), round(player.pos.y))
+                                collided = True
+                        for door in doors:
+                            collides, overlap, axis = door.check_collision(player_rect)
+                            if collides:
+                                player.pos.x += axis[0] * overlap
+                                player.pos.y += axis[1] * overlap
+                                player_rect.center = (round(player.pos.x), round(player.pos.y))
+                                collided = True
+                        for qte_lock in qte_locks:
+                            collides, overlap, axis = qte_lock.check_collision(player_rect)
+                            if collides:
+                                player.pos.x += axis[0] * overlap
+                                player.pos.y += axis[1] * overlap
+                                player_rect.center = (round(player.pos.x), round(player.pos.y))
+                                collided = True
+                        for chest in chests:
+                            if not chest.opened:
+                                collides, overlap, axis = chest.check_collision(player_rect)
+                                if collides:
+                                    player.pos.x += axis[0] * overlap
+                                    player.pos.y += axis[1] * overlap
+                                    player_rect.center = (round(player.pos.x), round(player.pos.y))
+                                    collided = True
+                        for block in player.blocks:
+                            if block.active and not block.destroyed:
+                                collides, overlap, axis = block.check_collision(player_rect)
+                                if collides:
+                                    player.pos.x += axis[0] * overlap
+                                    player.pos.y += axis[1] * overlap
+                                    player_rect.center = (round(player.pos.x), round(player.pos.y))
+                                    collided = True
+                        if not collided:
+                            break
+                    half_size = player.size / 2
+                    player.pos.x = max(half_size, min(world_width - half_size, player.pos.x))
+                    player.pos.y = max(half_size, min(world_height - half_size, player.pos.y))
+                    player.rect.center = (round(player.pos.x), round(player.pos.y))
+                # 更新医疗包投掷物
+                for medkit in player.medkits[:]:
+                    medkit.update(dt, player, None)
+                    if not medkit.active:
+                        player.medkits.remove(medkit)
+                # 更新迫击炮弹
+                for mortar in player.mortar_projectiles[:]:
+                    # 记录迫击炮更新前存活的敌人数量，用于后续击杀计数
+                    alive_before = [e for e in enemies if not e.dead and not e.downed]
+                    mortar.update(dt, player, enemies, walls, doors, chests, player.blocks, debug_vars)
+                    # 更新后检查新增的倒地/死亡敌人，增加玩家击倒数
+                    for enemy in enemies:
+                        if enemy in alive_before and (enemy.downed or enemy.dead):
+                            player_kill_count += 1
+                    if not mortar.active:
+                        player.mortar_projectiles.remove(mortar)
+                # 更新阻挡箱
+                for block in player.blocks[:]:
+                    block.update(dt)
+                    if block.update_shrink(dt) or (block.destroyed and not block.shrink_anim):
+                        player.blocks.remove(block)                
+                # 倒地状态倒计时处理
+                if player.downed:
+                    if player.downed_timer <= 0:
+                        game_over = True
+                for rocket in player.rockets[:]:
+                    rocket.update(enemies if debug_vars.get('bullet_tracking', False) else None)
+                    if not rocket.exploded:
+                        if not debug_vars['bullet_through_walls']:
+                            for wall in walls:
+                                if wall.rect.collidepoint(rocket.x, rocket.y):
+                                    rocket.explode()
+                                    break
+                            if not rocket.exploded:
+                                for door in doors:
+                                    test_rect = pygame.Rect(rocket.x - 2, rocket.y - 2, 4, 4)
+                                    if door.check_collision(test_rect)[0]:
+                                        rocket.explode()
+                                        break
+                            if not rocket.exploded:
+                                for qte_lock in qte_locks:
+                                    if qte_lock.rect.collidepoint(rocket.x, rocket.y):
+                                        rocket.explode()
+                                        break
+                            if not rocket.exploded:
+                                for chest in chests:
+                                    if not chest.opened and chest.rect.collidepoint(rocket.x, rocket.y):
+                                        rocket.explode()
+                                        break
+                            if not rocket.exploded:
+                                for block in player.blocks:
+                                    if block.active and not block.destroyed:
+                                        if block.rect.collidepoint(rocket.x, rocket.y):
+                                            rocket.explode()
+                                            block.take_damage(debug_vars['ranged_damage'])
+                                            break
+                        if not rocket.exploded:
+                            for enemy in enemies[:]:
+                                if not enemy.dead and enemy.rect.collidepoint(rocket.x, rocket.y):
+                                    was_alive = not (enemy.downed or enemy.dead)
+                                    if debug_vars.get('one_hit_kill', False):
+                                        enemy.hp = 0
+                                        enemy.enter_downed()
+                                    else:
+                                        enemy.take_damage(debug_vars['ranged_damage'])
+                                    # 检查是否从存活状态变为倒地/死亡
+                                    if was_alive and (enemy.downed or enemy.dead):
+                                        player_kill_count += 1
+                                    rocket.explode()
+                                    knockback_dir = pygame.Vector2(rocket.vx, rocket.vy)
+                                    if knockback_dir.length() > 0:
+                                        knockback_dir.normalize_ip()
+                                        enemy.recoil_vel += knockback_dir * 600
+                                        enemy.recoil_timer = max(enemy.recoil_timer, 0.4)
+                                    break
+                    if not rocket.active:
+                        player.rockets.remove(rocket)
+
+                if settings_menu.continuous_attack and game_state == "PLAYING":
+                    keys = pygame.key.get_pressed()
+                    if keys[pygame.K_e]:
+                        if current_weapon == 'rocket':
+                            if not has_rocket():
+                                if player.preview_mode:
+                                    player.preview_mode = False
+                                    aim_assist_target = None
+                                continuous_fire_timer = 0
+                            else:
+                                if not player.preview_mode:
+                                    player.preview_mode = True
+                                    if debug_vars.get('bullet_tracking', False) and debug_vars.get('infinite_range', False):
+                                        player.preview_max_dist = math.hypot(world_width, world_height)
+                                    else:
+                                        player.preview_max_dist = rocket_range
+                                if continuous_fire_timer <= 0:
+                                    can_shoot = (player.rocket_cooldown == 0 or debug_vars['ranged_no_cd'])
+                                    if can_shoot and not player.reloading:
+                                        if debug_vars['infinite_ammo'] or player.current_ammo > 0:
+                                            direction = player.preview_dir
+                                            if settings_menu.aim_assist and aim_assist_target and not mouse_moved_since_press:
+                                                to_target = aim_assist_target.pos - player.pos
+                                                if to_target.length() > 0:
+                                                    direction = to_target.normalize()
+                                            fire_rocket_volley(direction)
+                                            continuous_fire_timer = CONTINUOUS_FIRE_INTERVAL
+                                else:
+                                    continuous_fire_timer -= 1
+                        elif current_weapon == 'mortar':
+                            if player.mortar_level == 0:
+                                if player.mortar_preview:
+                                    player.mortar_preview = False
+                                    aim_assist_target = None
+                                continuous_fire_timer = 0
+                            elif player.mortar_reloading:
+                                continuous_fire_timer = 0
+                            else:
+                                if not player.mortar_preview:
+                                    player.mortar_preview = True
+                                if continuous_fire_timer <= 0:
+                                    can_shoot = (player.mortar_cooldown == 0 or debug_vars['ranged_no_cd'])
+                                    if can_shoot:
+                                        if debug_vars['infinite_ammo'] or player.mortar_ammo > 0:
+                                            target = player.mortar_preview_pos
+                                            if settings_menu.aim_assist and aim_assist_target and not mouse_moved_since_press:
+                                                target = aim_assist_target.pos
+                                            # 发射散射或多发（菠萝降临将在后续统一处理）
+                                            fire_mortar_volley(target)
+                                            continuous_fire_timer = CONTINUOUS_FIRE_INTERVAL
+                                else:
+                                    continuous_fire_timer -= 1
+                    else:
+                        if player.preview_mode:
+                            player.preview_mode = False
+                            aim_assist_target = None
+                        if player.mortar_preview:
+                            player.mortar_preview = False
+                            aim_assist_target = None
+                        continuous_fire_timer = 0
+                # ===== 无限投掷连续逻辑 =====
+                if debug_vars.get('infinite_throw', False) and game_state == "PLAYING":
+                    keys = pygame.key.get_pressed()
+                    if keys[pygame.K_2] and 'medkit' in equipped_items:
+                        # 倒地使用道具开关判断
+                        if player.downed and not debug_vars.get('downed_use_items', False):
+                            # 倒地且无权限，不投掷
+                            pass
+                        else:
+                            if player.medkit_preview:
+                                # 更新预览位置
+                                mx, my = pygame.mouse.get_pos()
+                                world_mx = mx + cam.offset.x
+                                world_my = my + cam.offset.y
+                                target = pygame.Vector2(world_mx, world_my)
+                                if not debug_vars.get('unlimited_throw_range', False):
+                                    max_dist = 600
+                                    if target.distance_to(player.pos) > max_dist:
+                                        target = player.pos + (target - player.pos).normalize() * max_dist
+                                player.medkit_preview_pos = target
+                                
+                                if continuous_throw_timer <= 0:
+                                    cost = MEDKIT_COSTS[medkit_level - 1]
+                                    if spend_coins(cost, "医疗包"):
+                                        target_pos = player.medkit_preview_pos
+                                        multiplier = debug_vars.get('throw_range_multiplier', 1)
+                                        medkit = MedkitProjectile(player.pos.x, player.pos.y, target_pos, speed=350, radius_multiplier=multiplier, heal_amount=medkit_heal_amount)
+                                        player.medkits.append(medkit)
+                                        if throw_sound:
+                                            throw_sound.play()
+                                        if not debug_vars.get('no_item_cooldown', False):
+                                            player.medkit_cooldown = player.medkit_cooldown_duration
+                                        continuous_throw_timer = CONTINUOUS_THROW_INTERVAL
+                                    else:
+                                        # 金币不足，停止投掷但保持预览
+                                        pass
+                                else:
+                                    continuous_throw_timer -= 1
+                            else:
+                                # 如果预览未开启（比如刚按下时），开启预览
+                                player.medkit_preview = True
+                                mx, my = pygame.mouse.get_pos()
+                                world_mx = mx + cam.offset.x
+                                world_my = my + cam.offset.y
+                                target = pygame.Vector2(world_mx, world_my)
+                                if not debug_vars.get('unlimited_throw_range', False):
+                                    max_dist = 600
+                                    if target.distance_to(player.pos) > max_dist:
+                                        target = player.pos + (target - player.pos).normalize() * max_dist
+                                player.medkit_preview_pos = target
+                                continuous_throw_timer = 0
+                    else:
+                        if player.medkit_preview:
+                            player.medkit_preview = False
+                        continuous_throw_timer = 0
+
+                    # ===== 阻挡箱连续放置逻辑 =====
+                    if keys[pygame.K_4] and 'block' in equipped_items:
+                        if player.downed and not debug_vars.get('downed_use_items', False):
+                            pass
+                        else:
+                            if player.block_preview:
+                                # 更新预览位置
+                                mx, my = pygame.mouse.get_pos()
+                                world_mx = mx + cam.offset.x
+                                world_my = my + cam.offset.y
+                                player.block_preview_pos = pygame.Vector2(world_mx, world_my)
+                                
+                                if continuous_block_timer <= 0:
+                                    cost = 50  # 固定价格50金币
+                                    if spend_coins(cost, "阻挡箱"):
+                                        target_pos = player.block_preview_pos
+                                        new_block = Block(target_pos.x, target_pos.y, size=90, duration=5.0)
+                                        player.blocks.append(new_block)
+                                        if block_place_sound:
+                                            block_place_sound.play()
+                                        if not debug_vars.get('no_item_cooldown', False):
+                                            player.block_cooldown = player.block_cooldown_duration
+                                        continuous_block_timer = CONTINUOUS_BLOCK_INTERVAL
+                                    else:
+                                        pass
+                                else:
+                                    continuous_block_timer -= 1
+                            else:
+                                # 如果预览未开启，开启预览
+                                player.block_preview = True
+                                mx, my = pygame.mouse.get_pos()
+                                world_mx = mx + cam.offset.x
+                                world_my = my + cam.offset.y
+                                player.block_preview_pos = pygame.Vector2(world_mx, world_my)
+                                continuous_block_timer = 0
+                    else:
+                        if player.block_preview:
+                            player.block_preview = False
+                        continuous_block_timer = 0
+                # ===== 调试面板"获取金币"持续加钱 =====
+                if debug_vars.get('get_coins', False) and game_state == "PLAYING":
+                    debug_coin_timer += dt
+                    while debug_coin_timer >= 0.1:
+                        add_coins(1000, "调试加钱")
+                        debug_coin_timer -= 0.1
+                if not arena_mode and escape_beacon.check_collision(player.rect):
+                    game_win = True
+                    win_timer = 0.0
+
+                if arena_mode and arena_wave_spawned_2:
+                    all_dead = True
+                    for enemy in enemies:
+                        if not enemy.dead:
+                            all_dead = False
+                            break
+                    if all_dead:
+                        game_win = True
+                        win_timer = 0.0
+
+                if player.preview_mode and settings_menu.aim_assist and aim_assist_target and not mouse_moved_since_press:
+                    to_target = aim_assist_target.pos - player.pos
+                    if to_target.length() > 0:
+                        player.preview_dir = to_target.normalize()
+
+                cam.follow(player.pos)
+            if message_timer > 0:
+                message_timer -= dt
+
+        elif game_state == "GAME_OVER":
+            game_over_timer += dt
+            if game_over_timer >= 3.0:
+                running = False
+        elif game_state == "TIMEOUT":
+            if timeout_phase == 0:
+                timeout_fade_alpha = min(255, timeout_fade_alpha + dt * 400)
+                if timeout_fade_alpha >= 255:
+                    timeout_phase = 1
+                    timeout_timer = 0.0
+            elif timeout_phase == 1:
+                timeout_timer += dt
+                if timeout_timer >= 2.0:
+                    timeout_phase = 2
+            elif timeout_phase == 2:
+                running = False
+        elif game_state == "WIN":
+            win_timer += dt
+            if win_timer >= 3.0:
+                running = False
+
+        # ===== 绘制部分 =====
+        draw_world_tiles(screen, cam)
+        player.draw(screen, cam)
+
+        for block in player.blocks:
+            block.draw(screen, cam)
+        if player.downed:
+            screen_pos = cam.apply(player.pos)
+            font = get_font(24)
+            timer_text = f"倒地 {player.downed_timer:.1f}s"
+            text_surf = font.render(timer_text, True, (255, 100, 100))
+            text_rect = text_surf.get_rect(center=(screen_pos.x, screen_pos.y - 60))
+            screen.blit(text_surf, text_rect)
+        if player.preview_mode:
+            start = cam.apply(player.pos)
+            end = start + player.preview_dir * player.preview_max_dist
+            pygame.draw.line(screen, (200, 220, 255, 150), (int(start.x), int(start.y)),
+                             (int(end.x), int(end.y)), 20)
+        if player.medkit_preview:
+            # 绘制抛物线预览轨迹（与实际 MedkitProjectile 完全相同的物理计算）
+            start = player.pos
+            end = player.medkit_preview_pos
+            dist = start.distance_to(end)
+            if dist > 5:
+                steps = 25
+                speed = 350
+                gravity = 600
+                actual_gravity = gravity * 1.2
+                t_total = dist / speed
+                to_target = end - start
+                horiz_dir = to_target.normalize()
+                vx0 = horiz_dir.x * speed
+                dy = end.y - start.y
+                vy0 = (dy - 0.5 * actual_gravity * t_total * t_total) / t_total
+                # 绘制曲线
+                points = []
+                for i in range(steps + 1):
+                    t = t_total * i / steps
+                    px = start.x + vx0 * t
+                    py = start.y + vy0 * t + 0.5 * actual_gravity * t * t
+                    screen_pt = cam.apply(pygame.Vector2(px, py))
+                    points.append((int(screen_pt.x), int(screen_pt.y)))
+                if len(points) > 1:
+                    pygame.draw.lines(screen, (144, 238, 144, 200), False, points, 2)
+            # 绘制落点范围圈
+            multiplier = debug_vars.get('throw_range_multiplier', 1)
+            radius = int(80 * multiplier)
+            screen_pos = cam.apply(player.medkit_preview_pos)
+            preview_surf = pygame.Surface((radius*2, radius*2), pygame.SRCALPHA)
+            pygame.draw.circle(preview_surf, (0, 255, 0, 80), (radius, radius), radius, 2)
+            screen.blit(preview_surf, (screen_pos.x - radius, screen_pos.y - radius))
+        if player.mortar_preview:
+            start = player.pos
+            end = player.mortar_preview_pos
+            dist = start.distance_to(end)
+            if dist > 5:
+                steps = 25
+                speed = 400
+                gravity = 600
+                actual_gravity = gravity * 1.2
+                t_total = dist / speed
+                to_target = end - start
+                horiz_dir = to_target.normalize()
+                vx0 = horiz_dir.x * speed
+                dy = end.y - start.y
+                vy0 = (dy - 0.5 * actual_gravity * t_total * t_total) / t_total
+                points = []
+                for i in range(steps + 1):
+                    t = t_total * i / steps
+                    px = start.x + vx0 * t
+                    py = start.y + vy0 * t + 0.5 * actual_gravity * t * t
+                    screen_pt = cam.apply(pygame.Vector2(px, py))
+                    points.append((int(screen_pt.x), int(screen_pt.y)))
+                if len(points) > 1:
+                    pygame.draw.lines(screen, (173, 216, 230, 120), False, points, 2)
+            # 绘制落点范围圈（浅蓝色半透明填充，与医疗包预览一致）
+            radius = 160
+            screen_pos = cam.apply(player.mortar_preview_pos)
+            preview_surf = pygame.Surface((radius*2, radius*2), pygame.SRCALPHA)
+            # 填充半透明圆
+            pygame.draw.circle(preview_surf, (173, 216, 230, 100), (radius, radius), radius, 0)
+            # 边框
+            pygame.draw.circle(preview_surf, (173, 216, 230, 120), (radius, radius), radius, 2)
+            screen.blit(preview_surf, (screen_pos.x - radius, screen_pos.y - radius))
+        healing_zone.draw(screen, cam.offset)
+        for wall in walls:
+            wall.draw(screen, cam.offset)
+        for door in doors:
+            door.draw(screen, cam.offset)
+        for qte_lock in qte_locks:
+            qte_lock.draw(screen, cam.offset)
+        for chest in chests:
+            chest.draw(screen, cam.offset)
+        for rocket in player.rockets:
+            rocket.draw(screen, cam)
+        for medkit in player.medkits:
+            medkit.draw(screen, cam)
+        for mortar in player.mortar_projectiles:
+            mortar.draw(screen, cam)
+        for enemy in enemies:
+            enemy.draw(screen, cam)
+        escape_beacon.draw(screen, cam.offset)
+        draw_minimap(screen, player, cam, walls, doors, vents, debug_vars['smoke_disable'], qte_locks, chests, enemies, None)
+        draw_health_bar_above_player(screen, player, cam)
+
+        # 根据当前武器决定显示哪种弹药UI
+        if current_weapon == 'rocket' and rocket_level_data.get('level', 0) > 0:
+            # 弹药为0且不在装弹时隐藏UI
+            if player.current_ammo > 0 or player.reloading:
+                draw_ammo_indicators_above_player(screen, player, cam, weapon_type='rocket')
+                draw_cooling_bar(screen, player, cam, weapon_type='rocket')
+        elif current_weapon == 'mortar' and player.mortar_level > 0:
+            # 弹药为0、备弹为0、且未在装弹时隐藏UI
+            if player.mortar_ammo > 0 or player.mortar_reserve_ammo > 0 or player.mortar_reloading:
+                draw_ammo_indicators_above_player(screen, player, cam, weapon_type='mortar',
+                                                  mortar_ammo=player.mortar_ammo,
+                                                  mortar_max_ammo=player.mortar_max_ammo)
+                draw_cooling_bar(screen, player, cam, weapon_type='mortar',
+                                 mortar_cooldown=player.mortar_cooldown,
+                                 mortar_cooldown_frames=player.mortar_cooldown_frames,
+                                 mortar_reloading=player.mortar_reloading,
+                                 mortar_reload_progress=1.0 - (player.mortar_reload_timer / player.mortar_reload_time) if player.mortar_reloading else 0.0)
+        if game_state == "PLAYING":
+            draw_game_timer(screen, game_time)
+            draw_coins_display(screen, coins, coin_logs)
+            draw_inventory_bar(screen, equipped_items, coins, medkit_level, block_level, truck_level, rocket_level_data.get('level', 1), mortar_level, player.current_ammo, max_ammo, player.reserve_ammo, player)
+        if hurt_alpha > 0:
+            red_surface = pygame.Surface((win_width, win_height), pygame.SRCALPHA)
+            red_surface.fill((255, 0, 0, int(hurt_alpha)))
+            screen.blit(red_surface, (0, 0))
+        if not debug_vars['smoke_disable']:
+            screen.blit(vignette, (0, 0))
+        if game_state == "INTRO" and intro_phase >= 2:
+            fade_surface = pygame.Surface((win_width, win_height), pygame.SRCALPHA)
+            if intro_phase == 2:
+                fade_surface.fill((0, 0, 0, intro_fade_alpha))
+                screen.blit(fade_surface, (0, 0))
+            elif intro_phase in (3, 4, 5):
+                fade_surface.fill((0, 0, 0, 255))
+                screen.blit(fade_surface, (0, 0))
+                font_win = get_font(72)
+                win_text = font_win.render("逃出生天", True, (255, 255, 255))
+                win_text.set_alpha(intro_text_alpha)
+                text_rect = win_text.get_rect(center=(win_width//2, win_height//2))
+                screen.blit(win_text, text_rect)
+            elif intro_phase == 6:
+                fade_surface.fill((0, 0, 0, intro_fade_alpha))
+                screen.blit(fade_surface, (0, 0))
+        if message_timer > 0:
+            message_timer -= dt
+            font_msg = get_font(48)
+            text_surf = font_msg.render(message_text, True, (255, 255, 0))
+            text_rect = text_surf.get_rect(center=(win_width//2, 80))
+            screen.blit(text_surf, text_rect)
+        if game_state == "TIMEOUT":
+            fade_surface = pygame.Surface((win_width, win_height), pygame.SRCALPHA)
+            fade_surface.fill((0, 0, 0, timeout_fade_alpha))
+            screen.blit(fade_surface, (0, 0))
+            if timeout_phase >= 1:
+                font_fail = get_font(72)
+                fail_text = font_fail.render("逃生失败", True, (255, 80, 80))
+                text_rect = fail_text.get_rect(center=(win_width // 2, win_height // 2))
+                screen.blit(fail_text, text_rect)
+        if game_over:
+            go_font = get_font(64)
+            go_text = go_font.render("游戏结束", True, (255, 0, 0))
+            go_rect = go_text.get_rect(center=(win_width//2, win_height//2))
+            screen.blit(go_text, go_rect)
+        if game_win:
+            win_font = get_font(64)
+            win_text = win_font.render("逃出生天！", True, (0, 255, 0))
+            win_rect = win_text.get_rect(center=(win_width//2, win_height//2))
+            screen.blit(win_text, win_rect)
+        if debug_panel_visible:
+            if 'current_enemy_index' not in locals():
+                current_enemy_index = 0
+            debug_controls, debug_max_scroll, current_enemy_index = draw_debug_panel(
+                screen, player, debug_vars, debug_scroll_y, enemies, current_enemy_index)
+
+        settings_menu.update_rects(win_width, win_height)
+        settings_menu.draw(screen)
+
+        fps = int(clock.get_fps())
+        fps_font = get_font(14)
+        fps_text = fps_font.render(f"FPS: {fps}", True, (255, 255, 0))
+        screen.blit(fps_text, (10, 10))
+        
+        kill_font = get_font(14)
+        kill_text = kill_font.render(f"击倒: {player_kill_count}", True, (255, 100, 100))
+        screen.blit(kill_text, (10, 28))
+
+        if show_f11_popup:
+            # 半透明遮罩
+            mask = pygame.Surface((win_width, win_height), pygame.SRCALPHA)
+            mask.fill((0, 0, 0, 180))
+            screen.blit(mask, (0, 0))
+            # 弹窗参数
+            popup_w, popup_h = 700, 280
+            popup_rect = pygame.Rect(0, 0, popup_w, popup_h)
+            popup_rect.center = (win_width // 2, win_height // 2)
+            # 白色弹窗主体
+            pygame.draw.rect(screen, WHITE, popup_rect, border_radius=12)
+            pygame.draw.rect(screen, BLACK, popup_rect, 3, border_radius=12)
+            # 主文字（分两行）
+            font_large = get_font(24)
+            line1 = font_large.render("你的账号(200558899)游戏环境存在异常或有作弊嫌疑,", True, BLACK)
+            line2 = font_large.render("请尝试重启/重装或清除第三方插件(50001)", True, BLACK)
+            line1_rect = line1.get_rect(center=(popup_rect.centerx, popup_rect.centery - 15))
+            line2_rect = line2.get_rect(center=(popup_rect.centerx, popup_rect.centery + 15))
+            screen.blit(line1, line1_rect)
+            screen.blit(line2, line2_rect)
+            # 取消按钮（左下）
+            cancel_btn = pygame.Rect(popup_rect.left + 40, popup_rect.bottom - 60, 100, 40)
+            pygame.draw.rect(screen, (200, 200, 200), cancel_btn, border_radius=8)
+            pygame.draw.rect(screen, BLACK, cancel_btn, 2, border_radius=8)
+            font_medium = get_font(24)
+            cancel_text = font_medium.render("取消", True, BLACK)
+            cancel_text_rect = cancel_text.get_rect(center=cancel_btn.center)
+            screen.blit(cancel_text, cancel_text_rect)
+            # 退出按钮（右下）
+            exit_btn = pygame.Rect(popup_rect.right - 140, popup_rect.bottom - 60, 100, 40)
+            pygame.draw.rect(screen, (200, 200, 200), exit_btn, border_radius=8)
+            pygame.draw.rect(screen, BLACK, exit_btn, 2, border_radius=8)
+            exit_text = font_medium.render("退出", True, BLACK)
+            exit_text_rect = exit_text.get_rect(center=exit_btn.center)
+            screen.blit(exit_text, exit_text_rect)
+
+        pygame.display.flip()
+
+    return game_win
+
+# ==================== 主菜单 ====================
+def main_menu():
+    SCREEN_WIDTH = 800
+    SCREEN_HEIGHT = 600
+    screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.FULLSCREEN | pygame.SCALED)
+    pygame.display.set_caption("暗木前哨 - 主菜单")
+
+    WHITE = (255, 255, 255)
+    BLACK = (0, 0, 0)
+    YELLOW = (255, 255, 0)
+    GRAY = (128, 128, 128)
+    BLUE = (0, 120, 215)
+    PURPLE = (128, 0, 128)
+    GOLD = (255, 215, 0)
+    LIGHT_BLUE = (173, 216, 230)
+    GREEN = (0, 255, 0)
+    RED = (255, 0, 0)
+    CYAN = (0, 200, 200)
+
+    # 安全字体加载函数
+    def safe_font(size, bold=False):
+        font_paths = [
+            "C:/Windows/Fonts/simhei.ttf",
+            "C:/Windows/Fonts/msyh.ttc",
+            "C:/Windows/Fonts/simsun.ttc",
+        ]
+        for path in font_paths:
+            if os.path.exists(path):
+                try:
+                    font = pygame.font.Font(path, size)
+                    font.set_bold(bold)
+                    return font
+                except:
+                    continue
+        font = pygame.font.Font(None, size)
+        font.set_bold(bold)
+        return font
+
+    big_font = safe_font(48, bold=True)
+    medium_font = safe_font(36)
+    small_font = safe_font(24)
+    tiny_font = safe_font(18)
+    currency_font = safe_font(18)
+
+    bg_path = r"D:\LS工作室\暗木前哨\游戏背景.jpg"
+    try:
+        bg_image = pygame.image.load(bg_path).convert()
+        bg_image = pygame.transform.scale(bg_image, (SCREEN_WIDTH, SCREEN_HEIGHT))
+    except:
+        bg_image = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
+        bg_image.fill((30, 30, 30))
+
+    coins = 0
+    coupons = 0
+    diamonds = 0
+    item_fragments = {'rocket': 0, 'medkit': 0, 'truck': 0, 'block': 0, 'mortar': 0}
+    item_levels = {'rocket': 1, 'medkit': 1, 'truck': 1, 'block': 1, 'mortar': 1}
+    universal_fragments = 0
+
+    AVAILABLE_ITEMS = ['rocket', 'medkit', 'truck', 'block', 'mortar']
+    equipped_items = ['rocket', 'medkit', 'truck', 'block']  # 保持四个槽位，空槽位用 None 表示
+    # 确保长度为4，不足则补 None
+    while len(equipped_items) < 4:
+        equipped_items.append(None)
+    equip_menu_visible = False
+    equip_check_rects = []
+    equip_item_rects = []      # 上方道具图标矩形列表
+    equip_slot_rects = []      # 下方四个槽位矩形列表
+    equip_selected_item = None # 当前选中的道具ID
+    clear_btn = pygame.Rect(0, 0, 120, 40)  # 清空按钮占位，具体位置在draw中设置
+    equip_back_rect = pygame.Rect(0, 0, 120, 50)
+    equip_button_rect = pygame.Rect(0, 0, 150, 60)
+
+    mode_button_rect = pygame.Rect(0, 0, 150, 60)
+    difficulty_popup_visible = False
+    selected_difficulty = "简单"
+    difficulty_options = ["简单", "困难", "噩梦"]
+    difficulty_rects = []
+
+    ROCKET_COOLDOWNS = [0.98, 0.93, 0.88, 0.83, 0.78, 0.73, 0.68, 0.63, 0.58, 0.53, 0.48, 0.43, 0.38]
+    ROCKET_DAMAGES = [56] * 13
+    ROCKET_RANGES = [800] * 13
+    MORTAR_COOLDOWNS = [1.14, 1.10, 1.06, 1.02, 0.98, 0.94, 0.90, 0.86, 0.82, 0.78, 0.74, 0.70, 0.66]
+    MORTAR_DAMAGES = [99] * 13
+    MORTAR_RANGES = [1200] * 13
+    MEDKIT_COSTS = [200, 196, 192, 188, 184, 180, 176, 172, 168, 164, 160, 156, 152]
+    MEDKIT_HEAL_AMOUNTS = [100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200, 210, 220]
+
+    UPGRADE_COSTS = {
+        'white':  [(1500,10),(1800,20),(2200,80),(2600,120),(3000,320),(3500,640),(4000,1200),
+                   (4500,1600),(5200,2000),(6000,2280),(7000,2600),(8000,3000)],
+        'blue':   [(300,5),(600,10),(2000,40),(3600,60),(6400,160),(9600,320),(16000,600),
+                   (20000,800),(27000,1000),(30000,1140),(35000,1300),(40000,1500)],
+        'purple': [(600,2),(1200,5),(4000,20),(7200,30),(12800,80),(19200,160),(32000,300),
+                   (40000,400),(54000,500),(60000,570),(70000,650),(80000,750)]
+    }
+
+    ITEM_QUALITY = {'rocket': 'white', 'medkit': 'blue', 'truck': 'purple', 'block': 'purple', 'mortar': 'purple'}
+    QUALITY_FRAGMENT_CONVERSION = {'white': 1, 'blue': 4, 'purple': 16}
+    MAX_ITEM_LEVEL = 13
+
+    PACK_PRICES = {'blue': ('coins', 2000), 'purple': ('coupons', 1180), 'gold': ('diamonds', 680)}
+    PACK_QUALITY_PROBS = {
+        'blue': {'white': 0.79, 'blue': 0.18, 'purple': 0.03},
+        'purple': {'white': 0.73, 'blue': 0.21, 'purple': 0.06},
+        'gold': {'white': 0.73, 'blue': 0.21, 'purple': 0.06}
+    }
+    QUALITY_ITEMS = {'white': ['rocket'], 'blue': ['medkit'], 'purple': ['truck', 'block', 'mortar']}
+    PACK_FRAGMENTS = {'blue': 60, 'purple': 170, 'gold': 864}
+
+    MAIN_MENU, PACK_SHOP, ITEM_SHOP, ITEM_DETAIL, RECHARGE_MENU = range(5)
+    game_state = MAIN_MENU
+
+    start_button_rect = pygame.Rect(0, 0, 200, 60)
+    pack_button_rect = pygame.Rect(0, 0, 150, 60)
+    item_button_rect = pygame.Rect(0, 0, 150, 60)
+    back_button_rect = pygame.Rect(0, 0, 120, 50)
+    upgrade_button_rect = pygame.Rect(0, 0, 180, 50)
+    bulk_upgrade_rect = pygame.Rect(0, 0, 180, 50)
+    convert_btn_rect = pygame.Rect(0, 0, 120, 40)
+
+    coin_plus_rect = pygame.Rect(0, 0, 20, 20)
+    coupon_plus_rect = pygame.Rect(0, 0, 20, 20)
+    diamond_plus_rect = pygame.Rect(0, 0, 20, 20)
+
+    pack_rects = {k: pygame.Rect(0, 0, 180, 240) for k in ['blue', 'purple', 'gold']}
+    item_slots = []
+
+    recharge_options = [{"amount": 1}, {"amount": 10}, {"amount": 128}, {"amount": 328}, {"amount": 648}]
+    recharge_rects = []
+    recharge_selected = None
+    recharge_result_timer = 0
+    recharge_result_text = ""
+
+    pack_result_timer = 0.0
+    pack_result_texts = []
+    bulk_pack_type = None
+    bulk_quantity = 1
+    bulk_show_popup = False
+    bulk_error_msg = ""
+    bulk_error_timer = 0.0
+    popup_message = ""
+    popup_message_timer = 0.0
+
+    def set_popup_message(msg):
+        nonlocal popup_message, popup_message_timer
+        popup_message = msg
+        popup_message_timer = 2.0
+
+    upgrade_choice_popup = False
+    upgrade_choice_action = None
+    convert_popup = False
+    convert_item = None
+    selected_item = 'rocket'
+
+    bulk_long_press_active = False
+    bulk_long_press_direction = None
+    bulk_long_press_timer = 0
+    bulk_long_press_count = 0
+    BULK_LONG_PRESS_DELAY = 20
+    BULK_LONG_PRESS_INTERVAL = 3
+
+    # ---------- 辅助绘制函数 ----------
+    def draw_currency_bar(y=20, show_universal=True):
+        spacing = 10
+        items = [(f"银币: {coins}", GREEN), (f"点券: {coupons}", CYAN), (f"钻石: {diamonds}", LIGHT_BLUE)]
+        if show_universal:
+            items.append((f"万能: {universal_fragments}", GOLD))
+        current_x = SCREEN_WIDTH - 20
+        for text, color in items:
+            surf = currency_font.render(text, True, WHITE)
+            w = surf.get_width()
+            current_x -= w + spacing
+            screen.blit(surf, (current_x, y))
+
+    def draw_button(rect, color, text, font, text_color=WHITE, border=WHITE, border_width=2, radius=10):
+        pygame.draw.rect(screen, color, rect, border_radius=radius)
+        if border:
+            pygame.draw.rect(screen, border, rect, border_width, border_radius=radius)
+        txt = font.render(text, True, text_color)
+        screen.blit(txt, txt.get_rect(center=rect.center))
+
+    # ---------- 主菜单绘制 ----------
+    def draw_main_menu():
+        screen.blit(bg_image, (0, 0))
+        bar_y = 20
+        spacing = 10
+        plus_size = 18
+        currencies = [(f"银币: {coins}", GREEN), (f"点券: {coupons}", CYAN), (f"钻石: {diamonds}", LIGHT_BLUE)]
+        current_x = SCREEN_WIDTH - 20
+        for text, color in currencies:
+            surf = currency_font.render(text, True, WHITE)
+            w = surf.get_width()
+            current_x -= w + 5 + plus_size + spacing
+            screen.blit(surf, (current_x, bar_y))
+            plus_rect = pygame.Rect(current_x + w + 5, bar_y, plus_size, plus_size)
+            pygame.draw.rect(screen, color, plus_rect, border_radius=5)
+            plus_txt = currency_font.render("+", True, WHITE)
+            screen.blit(plus_txt, (plus_rect.x + 4, plus_rect.y - 1))
+            if "银币" in text: coin_plus_rect.topleft = plus_rect.topleft
+            elif "点券" in text: coupon_plus_rect.topleft = plus_rect.topleft
+            elif "钻石" in text: diamond_plus_rect.topleft = plus_rect.topleft
+
+        mode_button_rect.bottomright = (SCREEN_WIDTH - 30, SCREEN_HEIGHT - 100)
+        draw_button(mode_button_rect, (100, 100, 150), "模式", medium_font)
+
+        start_button_rect.bottomright = (SCREEN_WIDTH - 30, SCREEN_HEIGHT - 30)
+        draw_button(start_button_rect, BLUE, "开始游戏", big_font)
+
+        pack_button_rect.bottomright = (start_button_rect.left - 20, SCREEN_HEIGHT - 30)
+        draw_button(pack_button_rect, PURPLE, "卡包", medium_font)
+
+        item_button_rect.bottomright = (pack_button_rect.left - 20, SCREEN_HEIGHT - 30)
+        draw_button(item_button_rect, (200, 100, 0), "道具", medium_font)
+
+        equip_button_rect.bottomright = (item_button_rect.left - 20, SCREEN_HEIGHT - 30)
+        draw_button(equip_button_rect, (100, 150, 100), "装备", medium_font)
+
+    # ---------- 卡包商店 ----------
+    def draw_pack_shop():
+        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 200))
+        screen.blit(overlay, (0, 0))
+        title = big_font.render("卡包商店", True, WHITE)
+        screen.blit(title, title.get_rect(center=(SCREEN_WIDTH//2, 50)))
+
+        pack_w, pack_h = SCREEN_WIDTH // 3 - 40, int(SCREEN_HEIGHT * 0.6)
+        start_x, y_pos = 30, SCREEN_HEIGHT//2 - pack_h//2
+        colors = {'blue': (0, 100, 255), 'purple': (150, 0, 200), 'gold': (255, 200, 0)}
+        names = {'blue': '基础卡包', 'purple': '稀有卡包', 'gold': '传说卡包'}
+        for i, (p_type, color) in enumerate(colors.items()):
+            x = start_x + i * (pack_w + 20)
+            rect = pygame.Rect(x, y_pos, pack_w, pack_h)
+            pack_rects[p_type] = rect
+            pygame.draw.rect(screen, color, rect, border_radius=20)
+            pygame.draw.rect(screen, WHITE, rect, 5, border_radius=20)
+
+            name_surf = medium_font.render(names[p_type], True, WHITE)
+            screen.blit(name_surf, name_surf.get_rect(center=(rect.centerx, rect.centery - 60)))
+
+            cur_type, price = PACK_PRICES[p_type]
+            cur_name = {'coins': '银币', 'coupons': '点券', 'diamonds': '钻石'}[cur_type]
+            price_surf = small_font.render(f"价格: {price} {cur_name}", True, YELLOW)
+            screen.blit(price_surf, price_surf.get_rect(center=(rect.centerx, rect.centery + 30)))
+
+            frag_surf = small_font.render(f"碎片: +{PACK_FRAGMENTS[p_type]}", True, (200, 200, 200))
+            screen.blit(frag_surf, frag_surf.get_rect(center=(rect.centerx, rect.centery + 60)))
+
+            buy_surf = small_font.render("点击购买", True, GREEN)
+            screen.blit(buy_surf, buy_surf.get_rect(center=(rect.centerx, rect.centery + 90)))
+
+        convert_btn_rect.topleft = (SCREEN_WIDTH - 150, 80)
+        draw_button(convert_btn_rect, (200, 150, 0), "转换碎片", small_font)
+
+        back_button_rect.topleft = (30, SCREEN_HEIGHT - 80)
+        draw_button(back_button_rect, GRAY, "返回", medium_font)
+        draw_currency_bar()
+
+    # ---------- 道具背包 ----------
+    def draw_item_shop():
+        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 200))
+        screen.blit(overlay, (0, 0))
+        title = big_font.render("道具背包", True, WHITE)
+        screen.blit(title, title.get_rect(center=(SCREEN_WIDTH//2, 50)))
+
+        slot_size = 100
+        start_x = (SCREEN_WIDTH - 4 * slot_size) // 2
+        start_y = 120
+        item_slots.clear()
+        for row in range(4):
+            for col in range(4):
+                rect = pygame.Rect(start_x + col * slot_size, start_y + row * slot_size, slot_size, slot_size)
+                item_slots.append(rect)
+                pygame.draw.rect(screen, (60, 60, 60), rect, border_radius=8)
+                pygame.draw.rect(screen, (150, 150, 150), rect, 2, border_radius=8)
+
+        items = [("火箭筒", (200,100,0), "R"), ("医疗箱", (200,50,50), "H"), ("卡车", (100,100,200), "T"), ("阻挡箱", (150,150,150), "B"),
+                 ("迫击炮", (128,0,128), "M")]
+        for i, (name, color, icon) in enumerate(items):
+            if i >= len(item_slots): break
+            slot = item_slots[i]
+            cx, cy = slot.center
+            pygame.draw.rect(screen, color, (cx-30, cy-20, 60, 40), border_radius=5)
+            pygame.draw.rect(screen, WHITE, (cx-30, cy-20, 60, 40), 2, border_radius=5)
+            icon_surf = small_font.render(icon, True, WHITE)
+            screen.blit(icon_surf, icon_surf.get_rect(center=(cx, cy)))
+            name_surf = small_font.render(name, True, WHITE)
+            screen.blit(name_surf, name_surf.get_rect(center=(cx, slot.bottom - 15)))
+
+        back_button_rect.topleft = (30, SCREEN_HEIGHT - 80)
+        draw_button(back_button_rect, GRAY, "返回", medium_font)
+        draw_currency_bar()
+
+    # ---------- 充值菜单 ----------
+    def draw_recharge_menu():
+        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 220))
+        screen.blit(overlay, (0, 0))
+        title = big_font.render("充值中心", True, WHITE)
+        screen.blit(title, title.get_rect(center=(SCREEN_WIDTH//2, 50)))
+
+        recharge_rects.clear()
+        for i, opt in enumerate(recharge_options):
+            rect = pygame.Rect(SCREEN_WIDTH//2 - 100, 150 + i*60, 200, 50)
+            recharge_rects.append((rect, opt))
+            draw_button(rect, (0, 150, 200), f"{opt['amount']}元", medium_font)
+
+        if recharge_result_timer > 0:
+            res_surf = medium_font.render(recharge_result_text, True, GREEN)
+            screen.blit(res_surf, res_surf.get_rect(center=(SCREEN_WIDTH//2, SCREEN_HEIGHT - 150)))
+
+        back_button_rect.topleft = (30, SCREEN_HEIGHT - 80)
+        draw_button(back_button_rect, GRAY, "返回", medium_font)
+        draw_currency_bar()
+
+    # ---------- 道具详情 ----------
+    def draw_item_detail():
+        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 220))
+        screen.blit(overlay, (0, 0))
+        names = {'rocket': '火箭筒', 'medkit': '医疗箱', 'truck': '卡车', 'block': '阻挡箱', 'mortar': '迫击炮'}
+        title = big_font.render(names[selected_item], True, WHITE)
+        screen.blit(title, title.get_rect(center=(SCREEN_WIDTH//2, 60)))
+
+        font_detail = safe_font(28)
+        left_x, y_start = 80, 150
+        line_gap = 50
+        level = item_levels[selected_item]
+        frag_surf = font_detail.render(f"专属碎片: {item_fragments[selected_item]}", True, WHITE)
+        screen.blit(frag_surf, (left_x, y_start - 40))
+
+        if selected_item == 'rocket':
+            lines = [f"伤害: {ROCKET_DAMAGES[level-1]}", f"攻击距离: {ROCKET_RANGES[level-1]}", f"攻击间隔: {ROCKET_COOLDOWNS[level-1]:.2f}秒"]
+        elif selected_item == 'medkit':
+            heal_amount = MEDKIT_HEAL_AMOUNTS[level-1]
+            lines = [f"恢复生命: {heal_amount}", f"局内消耗: {MEDKIT_COSTS[level-1]} 金币"]
+        elif selected_item == 'truck':
+            lines = [f"持续时间: {10+(level-1)*0.5:.1f}秒", "冷却时间: 3秒", "局内消耗: 180 金币"]
+        elif selected_item == 'mortar':
+            lines = [f"伤害: {MORTAR_DAMAGES[level-1]}", f"攻击距离: {MORTAR_RANGES[level-1]}", f"攻击间隔: {MORTAR_COOLDOWNS[level-1]:.2f}秒"]
+        else:  # block
+            # 冷却时间：13级1秒，每级减少0.125秒
+            block_cd = 1.0 + (13 - level) * 0.125
+            if block_cd < 1.0:
+                block_cd = 1.0
+            lines = ["持续时间: 5秒", f"冷却时间: {block_cd:.2f}秒", "局内消耗: 50 金币"]
+        for i, line in enumerate(lines):
+            screen.blit(font_detail.render(line, True, WHITE), (left_x, y_start + i*line_gap))
+
+        right_x = SCREEN_WIDTH - 280
+        lvl_surf = font_detail.render(f"当前等级: {level}", True, WHITE)
+        screen.blit(lvl_surf, (right_x, y_start))
+
+        quality = ITEM_QUALITY[selected_item]
+        costs = UPGRADE_COSTS[quality]
+        can_upgrade = level < MAX_ITEM_LEVEL
+        btn_color = (0, 180, 0) if can_upgrade and coins >= costs[level-1][0] and item_fragments[selected_item] >= costs[level-1][1] else (100, 100, 100)
+        upgrade_button_rect.topleft = (right_x, y_start + 50)
+        draw_button(upgrade_button_rect, btn_color, "升级", medium_font)
+
+        bulk_upgrade_rect.topleft = (right_x, upgrade_button_rect.bottom + 15)
+        draw_button(bulk_upgrade_rect, (0, 150, 200) if can_upgrade else (80,80,80), "一键升级", medium_font)
+
+        convert_btn_rect.topleft = (SCREEN_WIDTH - 150, 80)
+        draw_button(convert_btn_rect, (200, 150, 0), "转换碎片", small_font)
+
+        if can_upgrade:
+            next_lvl = level + 1
+            c_coins, c_frags = costs[level-1]
+            info_y = bulk_upgrade_rect.bottom + 30
+            screen.blit(small_font.render(f"下一级: {next_lvl} 级", True, (200,200,200)), (right_x, info_y))
+            screen.blit(small_font.render(f"需要银币: {c_coins}", True, YELLOW if coins >= c_coins else RED), (right_x, info_y+25))
+            screen.blit(small_font.render(f"需要碎片: {c_frags}", True, YELLOW if item_fragments[selected_item] >= c_frags else RED), (right_x, info_y+50))
+            if selected_item == 'rocket':
+                screen.blit(small_font.render(f"下期间隔: {ROCKET_COOLDOWNS[next_lvl-1]:.2f}秒", True, (180,180,180)), (right_x, info_y+80))
+        else:
+            screen.blit(medium_font.render("已满级", True, GOLD), (right_x, bulk_upgrade_rect.bottom + 30))
+
+        back_button_rect.topleft = (30, SCREEN_HEIGHT - 80)
+        draw_button(back_button_rect, GRAY, "返回", medium_font)
+        draw_currency_bar()
+
+    # ---------- 批量购买弹窗 ----------
+    def draw_bulk_purchase_popup():
+        if not bulk_show_popup: return
+        mask = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        mask.fill((0, 0, 0, 180))
+        screen.blit(mask, (0, 0))
+        popup_w, popup_h = 500, 400
+        popup_rect = pygame.Rect(0, 0, popup_w, popup_h)
+        popup_rect.center = (SCREEN_WIDTH//2, SCREEN_HEIGHT//2)
+        pygame.draw.rect(screen, (50, 50, 50), popup_rect, border_radius=15)
+        pygame.draw.rect(screen, (150, 150, 150), popup_rect, 3, border_radius=15)
+
+        name_map = {'blue': '基础卡包', 'purple': '稀有卡包', 'gold': '传说卡包'}
+        title = medium_font.render(name_map[bulk_pack_type], True, WHITE)
+        screen.blit(title, title.get_rect(center=(popup_rect.centerx, popup_rect.top + 40)))
+
+        qty_y = popup_rect.top + 100
+        screen.blit(small_font.render("购买数量:", True, WHITE), (popup_rect.left + 80, qty_y))
+        qty_box = pygame.Rect(popup_rect.left + 200, qty_y - 5, 100, 35)
+        pygame.draw.rect(screen, WHITE, qty_box, border_radius=5)
+        pygame.draw.rect(screen, (100, 100, 100), qty_box, 2, border_radius=5)
+        qty_text = medium_font.render(str(bulk_quantity), True, BLACK)
+        screen.blit(qty_text, qty_text.get_rect(center=qty_box.center))
+
+        minus_btn = pygame.Rect(qty_box.right + 10, qty_box.y, 35, 35)
+        plus_btn = pygame.Rect(minus_btn.right + 5, qty_box.y, 35, 35)
+        draw_button(minus_btn, (200,80,80), "-", medium_font, radius=5)
+        draw_button(plus_btn, (80,200,80), "+", medium_font, radius=5)
+
+        preset_btns = []
+        btn_w, btn_h = 70, 35
+        preset_y = qty_box.bottom + 30
+        total_w = 4*btn_w + 3*10
+        start_x = popup_rect.centerx - total_w//2
+        for i, val in enumerate([1, 5, 10, 100]):
+            btn_rect = pygame.Rect(start_x + i*(btn_w+10), preset_y, btn_w, btn_h)
+            preset_btns.append((btn_rect, val))
+            color = (80,80,180) if bulk_quantity == val else (80,80,180)
+            border = GOLD if bulk_quantity == val else WHITE
+            pygame.draw.rect(screen, color, btn_rect, border_radius=5)
+            pygame.draw.rect(screen, border, btn_rect, 3 if bulk_quantity == val else 2, border_radius=5)
+            txt = small_font.render(str(val), True, WHITE)
+            screen.blit(txt, txt.get_rect(center=btn_rect.center))
+
+        cur_type, price_per = PACK_PRICES[bulk_pack_type]
+        cur_name = {'coins': '银币', 'coupons': '点券', 'diamonds': '钻石'}[cur_type]
+        total_price = price_per * bulk_quantity
+        total_frags = PACK_FRAGMENTS[bulk_pack_type] * bulk_quantity
+        can_afford = (coins if cur_type=='coins' else coupons if cur_type=='coupons' else diamonds) >= total_price
+        color = YELLOW if can_afford else RED
+
+        preview_y = preset_y + 60
+        screen.blit(small_font.render(f"消耗: {total_price} {cur_name}", True, color), (popup_rect.left + 80, preview_y))
+        screen.blit(small_font.render(f"获得: {total_frags} 碎片", True, WHITE), (popup_rect.left + 80, preview_y + 30))
+
+        confirm_btn = pygame.Rect(popup_rect.centerx - 80, popup_rect.bottom - 80, 160, 45)
+        draw_button(confirm_btn, (0,180,0) if can_afford else (100,100,100), "确认购买", medium_font)
+
+        close_btn = pygame.Rect(popup_rect.right - 40, popup_rect.top + 10, 30, 30)
+        pygame.draw.circle(screen, (200,80,80), close_btn.center, 15)
+        screen.blit(small_font.render("X", True, WHITE), small_font.render("X", True, WHITE).get_rect(center=close_btn.center))
+
+        if bulk_error_timer > 0:
+            err = small_font.render(bulk_error_msg, True, RED)
+            screen.blit(err, err.get_rect(center=(popup_rect.centerx, popup_rect.bottom - 30)))
+        return {'minus': minus_btn, 'plus': plus_btn, 'presets': preset_btns, 'confirm': confirm_btn, 'close': close_btn}
+
+    def draw_upgrade_choice_popup():
+        mask = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        mask.fill((0, 0, 0, 180))
+        screen.blit(mask, (0, 0))
+        popup_rect = pygame.Rect(0, 0, 400, 200)
+        popup_rect.center = (SCREEN_WIDTH//2, SCREEN_HEIGHT//2)
+        pygame.draw.rect(screen, (50, 50, 50), popup_rect, border_radius=15)
+        pygame.draw.rect(screen, (150, 150, 150), popup_rect, 3, border_radius=15)
+        title = medium_font.render("选择升级方式", True, WHITE)
+        screen.blit(title, title.get_rect(center=(popup_rect.centerx, popup_rect.top + 40)))
+
+        frag_btn = pygame.Rect(popup_rect.centerx - 170, popup_rect.centery, 150, 45)
+        univ_btn = pygame.Rect(popup_rect.centerx + 20, popup_rect.centery, 150, 45)
+        draw_button(frag_btn, (0,150,200), "使用碎片", small_font)
+        draw_button(univ_btn, (200,150,0), "使用万能碎片", small_font)
+
+        close_btn = pygame.Rect(popup_rect.right - 40, popup_rect.top + 10, 30, 30)
+        pygame.draw.circle(screen, (200,80,80), close_btn.center, 15)
+        screen.blit(small_font.render("X", True, WHITE), small_font.render("X", True, WHITE).get_rect(center=close_btn.center))
+        return {'frag': frag_btn, 'univ': univ_btn, 'close': close_btn}
+
+    # ---------- 转换碎片弹窗 ----------
+    def draw_convert_popup():
+        nonlocal convert_item
+        if not convert_popup: return
+        if convert_item is None: convert_item = 'rocket'
+        mask = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        mask.fill((0, 0, 0, 180))
+        screen.blit(mask, (0, 0))
+        popup_rect = pygame.Rect(0, 0, 450, 300)
+        popup_rect.center = (SCREEN_WIDTH//2, SCREEN_HEIGHT//2)
+        pygame.draw.rect(screen, (50, 50, 50), popup_rect, border_radius=15)
+        pygame.draw.rect(screen, (150, 150, 150), popup_rect, 3, border_radius=15)
+
+        names = {'rocket': '火箭筒', 'medkit': '医疗箱', 'truck': '卡车', 'block': '阻挡箱'}
+        title = medium_font.render(f"转换 {names[convert_item]} 碎片", True, WHITE)
+        screen.blit(title, title.get_rect(center=(popup_rect.centerx, popup_rect.top + 40)))
+
+        ratio = QUALITY_FRAGMENT_CONVERSION[ITEM_QUALITY[convert_item]]
+        current = item_fragments[convert_item]
+        info_y = popup_rect.top + 100
+        screen.blit(small_font.render(f"当前拥有: {current} 专属碎片", True, WHITE), (popup_rect.left + 40, info_y))
+        screen.blit(small_font.render(f"转换比例: 1 专属 = {ratio} 万能", True, WHITE), (popup_rect.left + 40, info_y+30))
+        screen.blit(small_font.render(f"可获得: {current * ratio} 万能碎片", True, GOLD), (popup_rect.left + 40, info_y+60))
+
+        confirm_btn = pygame.Rect(popup_rect.centerx - 130, popup_rect.bottom - 80, 120, 40)
+        cancel_btn = pygame.Rect(popup_rect.centerx + 10, popup_rect.bottom - 80, 120, 40)
+        draw_button(confirm_btn, (0,180,0), "确认", small_font)
+        draw_button(cancel_btn, (180,0,0), "取消", small_font)
+        return {'confirm': confirm_btn, 'cancel': cancel_btn}
+
+    def draw_popup_message():
+        if popup_message_timer <= 0: return
+        msg = medium_font.render(popup_message, True, WHITE)
+        rect = msg.get_rect(center=(SCREEN_WIDTH//2, SCREEN_HEIGHT - 100))
+        bg = pygame.Surface((rect.w+40, rect.h+20), pygame.SRCALPHA)
+        bg.fill((0,0,0,200))
+        screen.blit(bg, (rect.x-20, rect.y-10))
+        screen.blit(msg, rect)
+
+    def draw_equip_menu():
+        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 220))
+        screen.blit(overlay, (0, 0))
+        title = big_font.render("装备管理", True, WHITE)
+        screen.blit(title, title.get_rect(center=(SCREEN_WIDTH//2, 60)))
+        hint = small_font.render("点击上方道具选择，再点击下方槽位放置", True, (200,200,200))
+        screen.blit(hint, hint.get_rect(center=(SCREEN_WIDTH//2, 110)))
+
+        names = {'rocket': '火箭筒', 'medkit': '医疗箱', 'truck': '皮卡车', 'block': '阻挡箱', 'mortar': '迫击炮'}
+        colors = {'rocket': (200,100,0), 'medkit': (200,50,50), 'truck': (100,100,200), 'block': (150,150,150), 'mortar': (128,0,128)}
+        icons = {'rocket': 'R', 'medkit': 'H', 'truck': 'T', 'block': 'B', 'mortar': 'M'}
+
+        global equip_selected_item
+        if 'equip_selected_item' not in globals():
+            equip_selected_item = None
+
+        # 绘制上方可用道具列表（5个道具）
+        equip_item_rects.clear()
+        start_x = (SCREEN_WIDTH - 5 * 100) // 2
+        y = 160
+        for i, item_id in enumerate(AVAILABLE_ITEMS):
+            x = start_x + i * 100
+            rect = pygame.Rect(x, y, 80, 80)
+            equip_item_rects.append((rect, item_id))
+            # 背景
+            bg_color = (80, 80, 80) if equip_selected_item == item_id else (50, 50, 50)
+            border_color = GOLD if equip_selected_item == item_id else (150, 150, 150)
+            border_width = 4 if equip_selected_item == item_id else 2
+            pygame.draw.rect(screen, bg_color, rect, border_radius=10)
+            pygame.draw.rect(screen, border_color, rect, border_width, border_radius=10)
+            # 图标
+            icon_rect = pygame.Rect(x + 20, y + 10, 40, 40)
+            pygame.draw.rect(screen, colors[item_id], icon_rect, border_radius=6)
+            pygame.draw.rect(screen, WHITE, icon_rect, 1, border_radius=6)
+            icon_txt = small_font.render(icons[item_id], True, WHITE)
+            screen.blit(icon_txt, icon_txt.get_rect(center=icon_rect.center))
+            # 名称
+            name_txt = tiny_font.render(names[item_id], True, WHITE)
+            screen.blit(name_txt, name_txt.get_rect(center=(x + 40, y + 65)))
+
+        # 绘制下方四个装备槽位（与局内道具栏类似）
+        equip_slot_rects.clear()
+        slot_size = 70
+        total_width = slot_size * 4 + 20 * 3
+        start_x = (SCREEN_WIDTH - total_width) // 2
+        slot_y = SCREEN_HEIGHT - 200
+        for i in range(4):
+            x = start_x + i * (slot_size + 20)
+            rect = pygame.Rect(x, slot_y, slot_size, slot_size)
+            equip_slot_rects.append(rect)
+            # 槽位背景
+            pygame.draw.rect(screen, (40, 40, 40), rect, border_radius=10)
+            pygame.draw.rect(screen, (150, 150, 150), rect, 2, border_radius=10)
+            # 如果该槽位有道具，绘制道具
+            if i < len(equipped_items) and equipped_items[i] is not None:
+                item_id = equipped_items[i]
+                # 图标
+                icon_rect = pygame.Rect(x + 15, slot_y + 10, 40, 40)
+                pygame.draw.rect(screen, colors[item_id], icon_rect, border_radius=6)
+                pygame.draw.rect(screen, WHITE, icon_rect, 1, border_radius=6)
+                icon_txt = small_font.render(icons[item_id], True, WHITE)
+                screen.blit(icon_txt, icon_txt.get_rect(center=icon_rect.center))
+                # 名称
+                name_txt = tiny_font.render(names[item_id], True, WHITE)
+                screen.blit(name_txt, name_txt.get_rect(center=(x + slot_size//2, slot_y + 65)))
+            else:
+                # 空槽位显示加号
+                plus_txt = medium_font.render("+", True, (100, 100, 100))
+                screen.blit(plus_txt, plus_txt.get_rect(center=rect.center))
+            # 显示槽位编号
+            num_txt = tiny_font.render(str(i+1), True, (200, 200, 200))
+            screen.blit(num_txt, (x + 5, slot_y + 5))
+
+        # 清除按钮
+        clear_btn = pygame.Rect(SCREEN_WIDTH//2 - 60, slot_y - 60, 120, 40)
+        draw_button(clear_btn, (150, 50, 50), "清空槽位", small_font)
+
+        equip_back_rect.topleft = (30, SCREEN_HEIGHT - 80)
+        draw_button(equip_back_rect, GRAY, "返回", medium_font)
+
+    def draw_difficulty_popup():
+        mask = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        mask.fill((0, 0, 0, 180))
+        screen.blit(mask, (0, 0))
+        popup_rect = pygame.Rect(0, 0, 700, 400)  # 加宽至700，稍增高
+        popup_rect.center = (SCREEN_WIDTH//2, SCREEN_HEIGHT//2)
+        pygame.draw.rect(screen, (50,50,50), popup_rect, border_radius=15)
+        pygame.draw.rect(screen, (150,150,150), popup_rect, 3, border_radius=15)
+        title = big_font.render("选择模式", True, WHITE)
+        screen.blit(title, title.get_rect(center=(popup_rect.centerx, popup_rect.top + 50)))
+
+        difficulty_rects.clear()
+        # 左侧难度选项
+        left_col_x = popup_rect.left + 80
+        colors = {"简单": (0,200,0), "困难": (200,150,0), "噩梦": (200,0,0)}
+        for i, diff in enumerate(difficulty_options):
+            btn = pygame.Rect(left_col_x, popup_rect.top + 120 + i*70, 180, 50)
+            difficulty_rects.append((btn, diff))
+            border = GOLD if diff == selected_difficulty else WHITE
+            draw_button(btn, colors[diff], diff, medium_font, border=border, border_width=4 if diff==selected_difficulty else 2)
+
+        # 右侧新模式选项（竞斗、4V1、大乱斗）
+        right_col_x = popup_rect.right - 260
+        mode_names = ["竞斗", "4V1", "大乱斗"]
+        mode_colors = [(150,100,200), (100,200,150), (200,100,100)]
+        for i, mode in enumerate(mode_names):
+            btn = pygame.Rect(right_col_x, popup_rect.top + 120 + i*70, 180, 50)
+            difficulty_rects.append((btn, mode))
+            border = GOLD if mode == selected_difficulty else WHITE
+            draw_button(btn, mode_colors[i], mode, medium_font, border=border, border_width=4 if mode==selected_difficulty else 2)
+
+        close_btn = pygame.Rect(popup_rect.right - 40, popup_rect.top + 10, 30, 30)
+        pygame.draw.circle(screen, (200,80,80), close_btn.center, 15)
+        screen.blit(small_font.render("X", True, WHITE), small_font.render("X", True, WHITE).get_rect(center=close_btn.center))
+        draw_currency_bar()
+
+    def draw_pack_result():
+        if pack_result_timer <= 0: return
+        overlay = pygame.Surface((400, 200), pygame.SRCALPHA)
+        overlay.fill((30,30,30,230))
+        rect = overlay.get_rect(center=(SCREEN_WIDTH//2, SCREEN_HEIGHT//2))
+        screen.blit(overlay, rect)
+        pygame.draw.rect(screen, GOLD, rect, 3, border_radius=10)
+        y_off = rect.centery - 40
+        for line in pack_result_texts:
+            txt = medium_font.render(line, True, WHITE)
+            screen.blit(txt, txt.get_rect(center=(rect.centerx, y_off)))
+            y_off += 40
+        hint = small_font.render("点击任意位置继续", True, GRAY)
+        screen.blit(hint, hint.get_rect(center=(rect.centerx, rect.bottom - 30)))
+
+    def draw_victory_reward(reward_amount):
+        overlay = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 220))
+        screen.blit(overlay, (0, 0))
+        title = big_font.render("逃出生天", True, GOLD)
+        screen.blit(title, title.get_rect(center=(SCREEN_WIDTH//2, 150)))
+        reward = big_font.render(f"获得点券: {reward_amount}", True, WHITE)
+        screen.blit(reward, reward.get_rect(center=(SCREEN_WIDTH//2, 280)))
+        hint = medium_font.render("点击任意位置继续", True, GRAY)
+        screen.blit(hint, hint.get_rect(center=(SCREEN_WIDTH//2, 400)))
+
+    # ---------- 主循环 ----------
+    clock = pygame.time.Clock()
+    running = True
+    while running:
+        dt = clock.tick(60) / 1000
+        if recharge_result_timer > 0: recharge_result_timer -= dt
+        if pack_result_timer > 0: pack_result_timer -= dt
+        if bulk_error_timer > 0: bulk_error_timer -= dt
+        if popup_message_timer > 0: popup_message_timer -= dt
+
+        if bulk_long_press_active and bulk_long_press_direction:
+            if bulk_long_press_timer <= 0:
+                bulk_long_press_count += 1
+                speed = 1 + (bulk_long_press_count // 5) * 0.5
+                interval = max(1, int(BULK_LONG_PRESS_INTERVAL / speed))
+                if bulk_long_press_direction == 'minus' and bulk_quantity > 1: bulk_quantity -= 1
+                elif bulk_long_press_direction == 'plus': bulk_quantity += 1
+                bulk_long_press_timer = interval
+            else:
+                bulk_long_press_timer -= 1
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                if game_state == MAIN_MENU: running = False
+                else: game_state = MAIN_MENU
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_F11:
+                if show_error_popup(screen, clock):
+                    running = False
+                continue
+            if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                bulk_long_press_active = False
+                bulk_long_press_direction = None
+
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                mpos = event.pos
+                # 批量购买弹窗处理
+                if bulk_show_popup:
+                    btns = draw_bulk_purchase_popup()
+                    popup_w, popup_h = 500, 400
+                    popup_rect = pygame.Rect(0, 0, popup_w, popup_h)
+                    popup_rect.center = (SCREEN_WIDTH//2, SCREEN_HEIGHT//2)
+                    if btns['close'].collidepoint(mpos) or not popup_rect.collidepoint(mpos):
+                        bulk_show_popup = False
+                        bulk_pack_type = None
+                        bulk_long_press_active = False
+                        continue
+                    if btns['minus'].collidepoint(mpos):
+                        bulk_long_press_active = True
+                        bulk_long_press_direction = 'minus'
+                        bulk_long_press_timer = BULK_LONG_PRESS_DELAY
+                        bulk_long_press_count = 0
+                        if bulk_quantity > 1: bulk_quantity -= 1
+                    elif btns['plus'].collidepoint(mpos):
+                        bulk_long_press_active = True
+                        bulk_long_press_direction = 'plus'
+                        bulk_long_press_timer = BULK_LONG_PRESS_DELAY
+                        bulk_long_press_count = 0
+                        bulk_quantity += 1
+                    else:
+                        for btn, val in btns['presets']:
+                            if btn.collidepoint(mpos):
+                                bulk_quantity = val
+                                break
+                        if btns['confirm'].collidepoint(mpos):
+                            cur_type, price = PACK_PRICES[bulk_pack_type]
+                            total = price * bulk_quantity
+                            can = (coins if cur_type=='coins' else coupons if cur_type=='coupons' else diamonds) >= total
+                            if can:
+                                if cur_type == 'coins': coins -= total
+                                elif cur_type == 'coupons': coupons -= total
+                                else: diamonds -= total
+                                # 蓝卡包不再奖励银币，其他卡包保持不变
+                                if bulk_pack_type == 'blue':
+                                    coin_gain = 0
+                                elif bulk_pack_type == 'purple':
+                                    coin_gain = sum(random.randint(2800,3500) for _ in range(bulk_quantity))
+                                else:  # gold
+                                    coin_gain = sum(random.randint(14000,16000) for _ in range(bulk_quantity))
+                                coins += coin_gain
+                                total_frags = PACK_FRAGMENTS[bulk_pack_type] * bulk_quantity
+                                probs = PACK_QUALITY_PROBS[bulk_pack_type]
+                                quality = random.choices(list(probs.keys()), weights=list(probs.values()))[0]
+                                target = random.choice(QUALITY_ITEMS[quality])
+                                item_fragments[target] += total_frags
+                                names = {'rocket':'火箭筒','medkit':'医疗箱','truck':'卡车','block':'阻挡箱','mortar':'迫击炮'}
+                                if bulk_pack_type == 'blue':
+                                    pack_result_texts = [f"获得 {total_frags} {names[target]}碎片"]
+                                else:
+                                    pack_result_texts = [f"获得 {total_frags} {names[target]}碎片", f"获得 {coin_gain} 银币"]
+                                if pack_open_sound:
+                                    pack_open_sound.play()
+                                pack_result_timer = 2.0
+                                bulk_show_popup = False
+                                bulk_pack_type = None
+                            else:
+                                cur_name = {'coins': '银币', 'coupons': '点券', 'diamonds': '钻石'}[cur_type]
+                                bulk_error_msg = f"{cur_name}不足"
+                                bulk_error_timer = 2.0
+                    continue
+
+                # 主菜单交互
+                if game_state == MAIN_MENU:
+                    if equip_menu_visible:
+                        if equip_back_rect.collidepoint(mpos):
+                            equip_menu_visible = False
+                            equip_selected_item = None
+                        else:
+                            # 重新计算清空按钮区域（与绘制时保持一致）
+                            slot_size = 70
+                            total_width = slot_size * 4 + 20 * 3
+                            start_x = (SCREEN_WIDTH - total_width) // 2
+                            slot_y = SCREEN_HEIGHT - 200
+                            clear_btn_rect = pygame.Rect(SCREEN_WIDTH//2 - 60, slot_y - 60, 120, 40)
+                            if clear_btn_rect.collidepoint(mpos):
+                                # 将所有槽位置为 None，保持长度4
+                                for i in range(4):
+                                    if i < len(equipped_items):
+                                        equipped_items[i] = None
+                                    else:
+                                        equipped_items.append(None)
+                                equip_selected_item = None
+                                set_popup_message("槽位已清空")
+                            else:
+                                # 重新获取 names 字典（与绘制时一致）
+                                names = {'rocket': '火箭筒', 'medkit': '医疗箱', 'truck': '皮卡车', 'block': '阻挡箱', 'mortar': '迫击炮'}
+                                # 先检查是否点击了上方道具
+                                item_clicked = None
+                                for rect, item_id in equip_item_rects:
+                                    if rect.collidepoint(mpos):
+                                        item_clicked = item_id
+                                        break
+                                if item_clicked is not None:
+                                    equip_selected_item = item_clicked
+                                    set_popup_message(f"已选择 {names[item_clicked]}")
+                                else:
+                                    # 检查是否点击了下方槽位
+                                    slot_clicked = -1
+                                    for i, rect in enumerate(equip_slot_rects):
+                                        if rect.collidepoint(mpos):
+                                            slot_clicked = i
+                                            break
+                                    if slot_clicked != -1 and equip_selected_item is not None:
+                                        # 确保列表长度至少为4
+                                        while len(equipped_items) < 4:
+                                            equipped_items.append(None)
+                                        # 检查该道具是否已在其他槽位中
+                                        already_equipped = False
+                                        for idx, e_item in enumerate(equipped_items):
+                                            if e_item == equip_selected_item and idx != slot_clicked:
+                                                already_equipped = True
+                                                break
+                                        if already_equipped:
+                                            set_popup_message(f"{names[equip_selected_item]} 已经装备过了")
+                                            equip_selected_item = None
+                                        else:
+                                            # 武器卡限制检查
+                                            weapon_items = ['rocket', 'mortar']
+                                            can_place = True
+                                            if equip_selected_item in weapon_items:
+                                                # 检查是否已有武器装备（且不在当前点击的槽位）
+                                                for idx, e_item in enumerate(equipped_items):
+                                                    if e_item in weapon_items and idx != slot_clicked:
+                                                        set_popup_message("只能携带一张武器卡")
+                                                        can_place = False
+                                                        break
+                                            if can_place:
+                                                # 直接按索引赋值，不改变列表长度
+                                                equipped_items[slot_clicked] = equip_selected_item
+                                                set_popup_message(f"{names[equip_selected_item]} 已装备到槽位 {slot_clicked+1}")
+                                                equip_selected_item = None
+                                    elif slot_clicked != -1 and equip_selected_item is None:
+                                        set_popup_message("请先在上方选择一个道具")
+                        continue
+                    if difficulty_popup_visible:
+                        popup_rect = pygame.Rect(0,0,700,400)  # 与绘制尺寸一致
+                        popup_rect.center = (SCREEN_WIDTH//2, SCREEN_HEIGHT//2)
+                        close_btn = pygame.Rect(popup_rect.right-40, popup_rect.top+10, 30,30)
+                        if close_btn.collidepoint(mpos) or not popup_rect.collidepoint(mpos):
+                            difficulty_popup_visible = False
+                        else:
+                            for rect, text in difficulty_rects:
+                                if rect.collidepoint(mpos):
+                                    if text in difficulty_options:  # 难度选择
+                                        selected_difficulty = text
+                                        difficulty_popup_visible = False
+                                        set_popup_message(f"已选择 {text} 难度")
+                                    elif text == "4V1":
+                                        set_popup_message("4V1模式正在开发中，敬请期待")
+                                    else:  # 其他新模式（竞斗、大乱斗）
+                                        selected_difficulty = text
+                                        difficulty_popup_visible = False
+                                        set_popup_message(f"已选择模式：{text}")
+                                    break
+                        continue
+
+                    if start_button_rect.collidepoint(mpos):
+                        rocket_data = {
+                            'level': item_levels['rocket'],
+                            'cooldown': ROCKET_COOLDOWNS[item_levels['rocket']-1],
+                            'damage': ROCKET_DAMAGES[item_levels['rocket']-1],
+                            'range': ROCKET_RANGES[item_levels['rocket']-1],
+                            'medkit_level': item_levels['medkit'],
+                            'medkit_heal_amount': MEDKIT_HEAL_AMOUNTS[item_levels['medkit']-1],
+                            'truck_level': item_levels['truck'],
+                            'block_level': item_levels['block'],
+                            'mortar_level': item_levels['mortar']
+                        }
+                        game_win = run_game(selected_difficulty, rocket_data, equipped_items.copy())
+                        pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.FULLSCREEN | pygame.SCALED)
+                        if game_win:
+                            reward = random.randint(200, 2000)
+                            coupons += reward
+                            showing = True
+                            while showing:
+                                for ev in pygame.event.get():
+                                    if ev.type in (pygame.QUIT, pygame.KEYDOWN, pygame.MOUSEBUTTONDOWN):
+                                        showing = False
+                                        if ev.type == pygame.QUIT: running = False
+                                draw_victory_reward(reward)
+                                pygame.display.flip()
+                                clock.tick(60)
+                    elif pack_button_rect.collidepoint(mpos): game_state = PACK_SHOP
+                    elif item_button_rect.collidepoint(mpos): game_state = ITEM_SHOP
+                    elif equip_button_rect.collidepoint(mpos): equip_menu_visible = True
+                    elif mode_button_rect.collidepoint(mpos): difficulty_popup_visible = True
+                    elif coin_plus_rect.collidepoint(mpos): recharge_selected = 'coins'; game_state = RECHARGE_MENU
+                    elif coupon_plus_rect.collidepoint(mpos): recharge_selected = 'coupons'; game_state = RECHARGE_MENU
+                    elif diamond_plus_rect.collidepoint(mpos): recharge_selected = 'diamonds'; game_state = RECHARGE_MENU
+
+                elif game_state == PACK_SHOP:
+                    if back_button_rect.collidepoint(mpos): game_state = MAIN_MENU
+                    elif convert_btn_rect.collidepoint(mpos):
+                        convert_item = selected_item
+                        convert_popup = True
+                    else:
+                        for p_type, rect in pack_rects.items():
+                            if rect.collidepoint(mpos):
+                                cur_type, price = PACK_PRICES[p_type]
+                                can = (coins if cur_type=='coins' else coupons if cur_type=='coupons' else diamonds) >= price
+                                if can:
+                                    bulk_pack_type = p_type
+                                    bulk_quantity = 1
+                                    bulk_show_popup = True
+                                    bulk_error_msg = ""
+                                break
+
+                elif game_state == ITEM_SHOP:
+                    if back_button_rect.collidepoint(mpos): game_state = MAIN_MENU
+                    else:
+                        for i, slot in enumerate(item_slots):
+                            if slot.collidepoint(mpos):
+                                if i == 0: selected_item = 'rocket'
+                                elif i == 1: selected_item = 'medkit'
+                                elif i == 2: selected_item = 'truck'
+                                elif i == 3: selected_item = 'block'
+                                elif i == 4: selected_item = 'mortar'
+                                else: break
+                                game_state = ITEM_DETAIL
+                                break
+
+                elif game_state == ITEM_DETAIL:
+                    if back_button_rect.collidepoint(mpos):
+                        game_state = ITEM_SHOP
+                    elif upgrade_button_rect.collidepoint(mpos):
+                        if item_levels[selected_item] < MAX_ITEM_LEVEL:
+                            # 进入升级选择子循环
+                            item = selected_item
+                            action = 'single'
+                            while True:
+                                # 绘制底层界面
+                                if game_state == MAIN_MENU: draw_main_menu()
+                                elif game_state == PACK_SHOP: draw_pack_shop()
+                                elif game_state == ITEM_SHOP: draw_item_shop()
+                                elif game_state == ITEM_DETAIL: draw_item_detail()
+                                elif game_state == RECHARGE_MENU: draw_recharge_menu()
+                                btns = draw_upgrade_choice_popup()
+                                pygame.display.flip()
+                                clock.tick(60)
+
+                                # 处理事件
+                                for ev in pygame.event.get():
+                                    if ev.type == pygame.QUIT:
+                                        pygame.quit()
+                                        sys.exit()
+                                    if ev.type == pygame.KEYDOWN and ev.key == pygame.K_ESCAPE:
+                                        break
+                                    if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+                                        mpos2 = ev.pos
+                                        popup_rect = pygame.Rect(0,0,400,200)
+                                        popup_rect.center = (SCREEN_WIDTH//2, SCREEN_HEIGHT//2)
+                                        if btns['close'].collidepoint(mpos2) or not popup_rect.collidepoint(mpos2):
+                                            break
+                                        use_universal = btns['univ'].collidepoint(mpos2)
+                                        if not (btns['frag'].collidepoint(mpos2) or use_universal):
+                                            continue
+
+                                        level = item_levels[item]
+                                        costs = UPGRADE_COSTS[ITEM_QUALITY[item]]
+                                        if action == 'single':
+                                            c_coins, c_frags = costs[level-1]
+                                            if coins < c_coins:
+                                                set_popup_message("银币不足")
+                                            else:
+                                                if use_universal:
+                                                    if universal_fragments >= c_frags:
+                                                        coins -= c_coins
+                                                        universal_fragments -= c_frags
+                                                        item_levels[item] += 1
+                                                        set_popup_message(f"{names[item]} 升级成功")
+                                                    else:
+                                                        set_popup_message("万能碎片不足")
+                                                else:
+                                                    if item_fragments[item] >= c_frags:
+                                                        coins -= c_coins
+                                                        item_fragments[item] -= c_frags
+                                                        item_levels[item] += 1
+                                                        set_popup_message(f"{names[item]} 升级成功")
+                                                    else:
+                                                        set_popup_message("专属碎片不足")
+                                        else:  # bulk
+                                            total_coins = 0
+                                            total_frags = 0
+                                            cur = level
+                                            while cur < MAX_ITEM_LEVEL:
+                                                c_coins, c_frags = costs[cur-1]
+                                                if coins >= total_coins + c_coins:
+                                                    total_coins += c_coins
+                                                    total_frags += c_frags
+                                                    cur += 1
+                                                else:
+                                                    break
+                                            temp_ded = item_fragments[item]
+                                            temp_uni = universal_fragments
+                                            final_lvl = level
+                                            used_coins = 0
+                                            for l in range(level, cur):
+                                                c_coins, c_frags = costs[l-1]
+                                                if use_universal:
+                                                    if temp_uni >= c_frags:
+                                                        temp_uni -= c_frags
+                                                        used_coins += c_coins
+                                                        final_lvl += 1
+                                                    else:
+                                                        break
+                                                else:
+                                                    if temp_ded >= c_frags:
+                                                        temp_ded -= c_frags
+                                                        used_coins += c_coins
+                                                        final_lvl += 1
+                                                    else:
+                                                        break
+                                            if final_lvl > level:
+                                                coins -= used_coins
+                                                universal_fragments = temp_uni
+                                                item_fragments[item] = temp_ded
+                                                item_levels[item] = final_lvl
+                                                set_popup_message(f"{names[item]} 升至 {final_lvl} 级")
+                                            else:
+                                                set_popup_message("资源不足")
+                                        break
+                                else:
+                                    continue
+                                break
+                    elif bulk_upgrade_rect.collidepoint(mpos):
+                        if item_levels[selected_item] < MAX_ITEM_LEVEL:
+                            # 进入升级选择子循环（批量）
+                            item = selected_item
+                            action = 'bulk'
+                            while True:
+                                # 绘制底层界面
+                                if game_state == MAIN_MENU: draw_main_menu()
+                                elif game_state == PACK_SHOP: draw_pack_shop()
+                                elif game_state == ITEM_SHOP: draw_item_shop()
+                                elif game_state == ITEM_DETAIL: draw_item_detail()
+                                elif game_state == RECHARGE_MENU: draw_recharge_menu()
+                                btns = draw_upgrade_choice_popup()
+                                pygame.display.flip()
+                                clock.tick(60)
+
+                                for ev in pygame.event.get():
+                                    if ev.type == pygame.QUIT:
+                                        pygame.quit()
+                                        sys.exit()
+                                    if ev.type == pygame.KEYDOWN and ev.key == pygame.K_ESCAPE:
+                                        break
+                                    if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+                                        mpos2 = ev.pos
+                                        popup_rect = pygame.Rect(0,0,400,200)
+                                        popup_rect.center = (SCREEN_WIDTH//2, SCREEN_HEIGHT//2)
+                                        if btns['close'].collidepoint(mpos2) or not popup_rect.collidepoint(mpos2):
+                                            break
+                                        use_universal = btns['univ'].collidepoint(mpos2)
+                                        if not (btns['frag'].collidepoint(mpos2) or use_universal):
+                                            continue
+
+                                        level = item_levels[item]
+                                        costs = UPGRADE_COSTS[ITEM_QUALITY[item]]
+                                        if action == 'single':
+                                            # 同上的single逻辑
+                                            c_coins, c_frags = costs[level-1]
+                                            if coins < c_coins:
+                                                set_popup_message("银币不足")
+                                            else:
+                                                if use_universal:
+                                                    if universal_fragments >= c_frags:
+                                                        coins -= c_coins
+                                                        universal_fragments -= c_frags
+                                                        item_levels[item] += 1
+                                                        set_popup_message(f"{names[item]} 升级成功")
+                                                    else:
+                                                        set_popup_message("万能碎片不足")
+                                                else:
+                                                    if item_fragments[item] >= c_frags:
+                                                        coins -= c_coins
+                                                        item_fragments[item] -= c_frags
+                                                        item_levels[item] += 1
+                                                        set_popup_message(f"{names[item]} 升级成功")
+                                                    else:
+                                                        set_popup_message("专属碎片不足")
+                                        else:  # bulk
+                                            total_coins = 0
+                                            total_frags = 0
+                                            cur = level
+                                            while cur < MAX_ITEM_LEVEL:
+                                                c_coins, c_frags = costs[cur-1]
+                                                if coins >= total_coins + c_coins:
+                                                    total_coins += c_coins
+                                                    total_frags += c_frags
+                                                    cur += 1
+                                                else:
+                                                    break
+                                            temp_ded = item_fragments[item]
+                                            temp_uni = universal_fragments
+                                            final_lvl = level
+                                            used_coins = 0
+                                            for l in range(level, cur):
+                                                c_coins, c_frags = costs[l-1]
+                                                if use_universal:
+                                                    if temp_uni >= c_frags:
+                                                        temp_uni -= c_frags
+                                                        used_coins += c_coins
+                                                        final_lvl += 1
+                                                    else:
+                                                        break
+                                                else:
+                                                    if temp_ded >= c_frags:
+                                                        temp_ded -= c_frags
+                                                        used_coins += c_coins
+                                                        final_lvl += 1
+                                                    else:
+                                                        break
+                                            if final_lvl > level:
+                                                coins -= used_coins
+                                                universal_fragments = temp_uni
+                                                item_fragments[item] = temp_ded
+                                                item_levels[item] = final_lvl
+                                                set_popup_message(f"{names[item]} 升至 {final_lvl} 级")
+                                            else:
+                                                set_popup_message("资源不足")
+                                        break
+                                else:
+                                    continue
+                                break
+                    elif convert_btn_rect.collidepoint(mpos):
+                        convert_popup = True
+                        convert_item = selected_item
+
+                elif game_state == RECHARGE_MENU:
+                    if back_button_rect.collidepoint(mpos): game_state = MAIN_MENU
+                    else:
+                        for rect, opt in recharge_rects:
+                            if rect.collidepoint(mpos):
+                                amt = opt['amount']
+                                if recharge_selected == 'coins':
+                                    coins += amt * 1000
+                                    recharge_result_text = f"充值成功！获得 {amt*1000} 银币"
+                                elif recharge_selected == 'coupons':
+                                    coupons += amt * 100
+                                    recharge_result_text = f"充值成功！获得 {amt*100} 点券"
+                                else:
+                                    diamonds += amt * 10
+                                    recharge_result_text = f"充值成功！获得 {amt*10} 钻石"
+                                recharge_result_timer = 2.0
+                                break
+
+ 
+
+                # 转换碎片弹窗（独立子循环，避免事件冲突）
+                if convert_popup:
+                    in_convert = True
+                    while in_convert and convert_popup:
+                        for ev in pygame.event.get():
+                            if ev.type == pygame.QUIT:
+                                pygame.quit()
+                                sys.exit()
+                            if ev.type == pygame.KEYDOWN and ev.key == pygame.K_ESCAPE:
+                                in_convert = convert_popup = False
+                                break
+                            if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+                                btns = draw_convert_popup()
+                                popup_rect = pygame.Rect(0,0,450,300)
+                                popup_rect.center = (SCREEN_WIDTH//2, SCREEN_HEIGHT//2)
+                                if not popup_rect.collidepoint(ev.pos):
+                                    in_convert = convert_popup = False
+                                    break
+                                if btns['cancel'].collidepoint(ev.pos):
+                                    in_convert = convert_popup = False
+                                    break
+                                if btns['confirm'].collidepoint(ev.pos):
+                                    ratio = QUALITY_FRAGMENT_CONVERSION[ITEM_QUALITY[convert_item]]
+                                    current = item_fragments[convert_item]
+                                    if current > 0:
+                                        universal_fragments += current * ratio
+                                        item_fragments[convert_item] = 0
+                                        set_popup_message(f"获得 {current * ratio} 万能碎片")
+                                    else:
+                                        set_popup_message("没有碎片可转换")
+                                    in_convert = convert_popup = False
+                                    break
+
+                        # 绘制底层界面
+                        if game_state == MAIN_MENU: draw_main_menu()
+                        elif game_state == PACK_SHOP: draw_pack_shop()
+                        elif game_state == ITEM_SHOP: draw_item_shop()
+                        elif game_state == ITEM_DETAIL: draw_item_detail()
+                        elif game_state == RECHARGE_MENU: draw_recharge_menu()
+                        draw_convert_popup()
+                        pygame.display.flip()
+                        clock.tick(60)
+                    continue
+
+        # 绘制当前界面
+        if game_state == MAIN_MENU: draw_main_menu()
+        elif game_state == PACK_SHOP: draw_pack_shop()
+        elif game_state == ITEM_SHOP: draw_item_shop()
+        elif game_state == ITEM_DETAIL: draw_item_detail()
+        elif game_state == RECHARGE_MENU: draw_recharge_menu()
+
+        if equip_menu_visible: draw_equip_menu()
+        if difficulty_popup_visible: draw_difficulty_popup()
+        if pack_result_timer > 0: draw_pack_result()
+        if bulk_show_popup: draw_bulk_purchase_popup()  
+        if upgrade_choice_popup: draw_upgrade_choice_popup()
+        if convert_popup: draw_convert_popup()
+        if popup_message_timer > 0: draw_popup_message()
+
+        pygame.display.flip()
+
+    pygame.quit()
+    sys.exit()
+if __name__ == "__main__":
+    main_menu()
